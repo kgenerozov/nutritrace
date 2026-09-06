@@ -1,8 +1,8 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'com.nutritrace.app',
-  appName: 'NutriTrace',
+  appId: 'com.nutritrace.app.backfill',
+  appName: 'NutriTrace Backfill',
   webDir: 'dist',
   // In dev, point to your local Vite dev server for live-reload on device
   // Uncomment and set your machine's LAN IP when doing native dev builds:

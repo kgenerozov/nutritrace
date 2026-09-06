@@ -25,6 +25,7 @@ const _dlog = import.meta.env.DEV
 
 import { isNative } from './platform.js';
 import { HealthConnect } from '@devmaxime/capacitor-health-connect';
+import { BACKFILL_UTILITY } from './backfill-flag.js';
 
 function _getPlugin() {
   if (!isNative) return null;
@@ -637,22 +638,25 @@ export async function syncHealthConnect(dateStr) {
   // readTodayData used so a manual sync captures today's exercise. The push
   // path (sync.js) will send these upstream on the next cycle; a locally-
   // authored workout has server_id=NULL until the push confirms.
+  // BACKFILL APK: do not import ExerciseSession as workouts.
   let workoutCount = 0;
-  try {
-    const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
-    const todayEnd = now.toISOString();
-    const sessions = await readExerciseSessions(todayStart, todayEnd);
-    for (const w of sessions) {
-      try {
-        await dbUpsertWorkoutLocal(w);
-        workoutCount++;
-      } catch (e) {
-        _dlog(`[health-connect] workout upsert failed for ${w.source_id}: ${e?.message}`);
+  if (!BACKFILL_UTILITY) {
+    try {
+      const now = new Date();
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+      const todayEnd = now.toISOString();
+      const sessions = await readExerciseSessions(todayStart, todayEnd);
+      for (const w of sessions) {
+        try {
+          await dbUpsertWorkoutLocal(w);
+          workoutCount++;
+        } catch (e) {
+          _dlog(`[health-connect] workout upsert failed for ${w.source_id}: ${e?.message}`);
+        }
       }
+    } catch (e) {
+      _dlog(`[health-connect] ExerciseSession sync failed: ${e?.message}`);
     }
-  } catch (e) {
-    _dlog(`[health-connect] ExerciseSession sync failed: ${e?.message}`);
   }
 
   // Snapshot derived scores (Readiness + Resilience pillars) into the same

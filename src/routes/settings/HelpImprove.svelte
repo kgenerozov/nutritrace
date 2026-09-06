@@ -11,6 +11,7 @@
   import { isNative } from '../../lib/platform.js';
   import { NtApi } from '../../lib/api.js';
   import { showError } from '../../stores/toast.js';
+  import HealthConnectHistoryImport from '../../components/settings/HealthConnectHistoryImport.svelte';
 
   // ── Diagnostics: in-app log capture ──────────────────────────────────────
   let _logsSheet = false;
@@ -247,6 +248,7 @@
         Generate calibration export
       </button>
     </div>
+    <HealthConnectHistoryImport />
   </div>
 </div>
 
