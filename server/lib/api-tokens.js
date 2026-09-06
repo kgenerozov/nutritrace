@@ -32,6 +32,7 @@ export const SCOPE_DESCRIPTIONS = {
   'read:foods':      "Read the token owner's foods library. Used by CookTrace federation.",
   'write:workouts':  "Post workouts into the token owner's wellness history. Used by LiftTrace federation.",
   'write:activity':  "Log manual activity entries into the diary Activity section. Used by external trackers and headless integrations (issue #154).",
+  'read:wellness':   "Read the token owner's stored wellness history, including Health Connect, wearable and body metrics.",
   'mcp:read':        'MCP: read the diary, goals, daily totals, and foods catalog (5 tools).',
   'mcp:write':       'MCP: log food / water / meals / body stats (4 additive tools). Requires MCP_WRITE_ENABLED=1 on the server.',
   'mcp:destroy':     'MCP: delete or edit diary entries, create catalog foods (3 tools). Requires MCP_DESTROY_ENABLED=1 AND every call to include confirm=true.',
@@ -51,6 +52,11 @@ export const KNOWN_SCOPES = new Set([
   // write:workouts, which targets the workouts table + wellness_data
   // rollup for the dynamic-TDEE calorie-goal path. See issue #154.
   'write:activity',
+  // read:wellness unlocks GET /api/v1/wellness — stored wellness_data
+  // rows owned by the token user (Health Connect, wearables, federation
+  // body metrics, LiftTrace calorie rollups, etc.). Distinct from
+  // mcp:read, which remains nutrition/goals/diary MCP only.
+  'read:wellness',
   // write:body-measurements unlocks POST /api/v1/body-measurements —
   // for Home Assistant / Node-RED / Gadgetbridge and other headless
   // integrations pushing smart-scale readings straight to the server

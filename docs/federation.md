@@ -48,12 +48,15 @@ return `403 Forbidden`. Available scopes:
 | Scope             | Grants                                                                           |
 |-------------------|----------------------------------------------------------------------------------|
 | `read:foods`      | List + read foods owned by the user. Used by CookTrace (in private development). |
+| `read:wellness`   | Read the token owner's stored wellness history (Health Connect, wearable, federation body metrics, LiftTrace calorie rollups, and any other `wellness_data` source) via `GET /api/v1/wellness`. Does **not** grant MCP nutrition tools. |
 | `write:workouts`  | Push completed workouts to the user's wellness data via `POST /api/v1/workouts`. Used by LiftTrace so its calorie estimates feed NutriTrace's dynamic-TDEE calculations. |
 | `write:body-measurements` | Push scale readings (weight, body composition) via `POST /api/v1/body-measurements`. Aimed at Home Assistant, Node-RED, Gadgetbridge and other headless integrations that pull data from BLE smart scales the phone can't see. |
+| `mcp:read`        | MCP nutrition/goals/diary/food catalog tools under `/api/mcp`. Does **not** grant `GET /api/v1/wellness`. |
 
 Future scopes (`read:meals`, `read:diary`, etc.) will be added alongside
 the endpoints they unlock; gating tokens on scopes the server can't
-actually serve is confusing UI.
+actually serve is confusing UI. `mcp:read` is not a generic "read everything"
+scope.
 
 ### Rate limiting
 
@@ -247,9 +250,76 @@ curl -X POST https://nutritrace.example.com/api/v1/body-measurements \
 ```
 
 **Reading data back.** `GET /api/v1/body-measurements` is not yet
-implemented — this phase is write-only, matching the "push from
-integration → NT is the source of truth" pattern. Read endpoints
-will be added on demand.
+implemented — that route remains write-only. Stored body/wellness
+metrics (including `source='federation'` rows written by this POST)
+are readable through `GET /api/v1/wellness` with `read:wellness`.
+
+### `GET /api/v1/wellness`
+
+**Requires scope:** `read:wellness`. A token that only has `mcp:read`
+receives `403 auth_scope`.
+
+Read stored `wellness_data` rows owned by the token user. The owner is
+always `req.apiUser.id`. There is no `user_id` query parameter; a
+caller cannot read another user's rows.
+
+This endpoint inherits the federation Bearer rate limit
+(`API_RATE_LIMIT_PER_MIN`, default 60/min, `429` + `Retry-After`).
+
+**Query parameters:**
+
+| Param         | Type    | Required | Description |
+|---------------|---------|----------|-------------|
+| `from`        | date    | yes      | Inclusive start, source health-day `YYYY-MM-DD`. Not converted to a UTC datetime boundary. |
+| `to`          | date    | yes      | Inclusive end, same date-only semantics. |
+| `source`      | string  | no       | Exact `source` match. Repeat the parameter for an OR list (`source=a&source=b`). No server-side whitelist; unknown sources are valid filters. |
+| `metric_type` | string  | no       | Exact `metric_type` match. Repeat for an OR list. No whitelist of known metric names. |
+
+Malformed `from`/`to` (wrong shape or calendar-invalid) → `400` (`bad_from` / `bad_to`).
+`from > to` → `400` (`bad_range`). Inclusive range longer than 366 days → `400` (`range_too_large`).
+Missing or invalid Bearer → `401`. Missing scope → `403`.
+
+**Missing vs zero.** If no row exists for a `(date, source, metric_type)`,
+that combination is omitted. The API never synthesizes `value: 0` for an
+absent metric. If the database actually stores numeric `0`, the wire
+returns `0`.
+
+**Response:**
+
+```json
+{
+  "from": "2026-09-01",
+  "to": "2026-09-06",
+  "rows": [
+    {
+      "date": "2026-09-06",
+      "source": "health_connect",
+      "metric_type": "steps",
+      "value": 123,
+      "metadata": {},
+      "synced_at": "2026-09-06T14:33:59Z"
+    }
+  ]
+}
+```
+
+`rows` is the top-level array name. Ordering is deterministic:
+`date ASC, source ASC, metric_type ASC`.
+
+Wire objects do not include `user_id`, username, or token fields.
+Consumers must ignore unknown additive fields.
+
+`metadata` is stored as JSON text. The wire value is a JSON object, or
+`null` when the stored text is not a JSON object (malformed JSON,
+arrays, primitives). Empty / SQL NULL metadata becomes `{}`. Unknown
+object keys are preserved.
+
+`synced_at` is SQLite `datetime('now')` UTC (`YYYY-MM-DD HH:MM:SS`)
+converted to ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`) on the wire. Stored
+timestamps are not rewritten.
+
+GET is read-only: it does not insert, update, or delete `wellness_data`
+rows.
 
 ---
 

@@ -10,6 +10,7 @@ import foodsRouter from './foods.js';
 import workoutsRouter from './workouts.js';
 import activityRouter from './activity.js';
 import bodyMeasurementsRouter from './body-measurements.js';
+import wellnessRouter from './wellness.js';
 
 const router = Router();
 
@@ -22,5 +23,6 @@ router.use('/foods', foodsRouter);
 router.use('/workouts', workoutsRouter);
 router.use('/activity', activityRouter);
 router.use('/body-measurements', bodyMeasurementsRouter);
+router.use('/wellness', wellnessRouter);
 
 export default router;
