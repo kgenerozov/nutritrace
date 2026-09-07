@@ -6,8 +6,8 @@
  * record name is missing from androidx RECORDS_TYPE_NAME_MAP. That map uses
  * legacy aliases for some types:
  *   HeartRate  → HeartRateSeries
- *   ExerciseSession → ActivitySession (also accepted as ExerciseSession on
- *   some SDK builds)
+ *   ExerciseSession → ActivitySession (ExerciseSession is invalid on the
+ *   pinned plugin and rejects the whole permission request)
  */
 
 export const DESIRED_READ_RECORD_TYPES = Object.freeze([
@@ -30,9 +30,15 @@ export const DESIRED_READ_RECORD_TYPES = Object.freeze([
   'Vo2Max',
 ]);
 
-/** Names the pinned plugin / androidx map is known to accept. */
+/**
+ * Names the pinned plugin / androidx map is known to accept.
+ * Live v1.2.0 device logs: `ExerciseSession` is Invalid/Unexpected;
+ * `ActivitySession` is the map key for ExerciseSessionRecord.
+ * HeartRate permission/readRecords key is `HeartRateSeries`; aggregate
+ * still uses the plugin switch name `HeartRate`.
+ */
 export const PINNED_PLUGIN_READ_RECORD_TYPES = Object.freeze(new Set([
-  ...DESIRED_READ_RECORD_TYPES,
+  ...DESIRED_READ_RECORD_TYPES.filter((name) => name !== 'ExerciseSession'),
   'HeartRateSeries',
   'ActivitySession',
 ]));
@@ -43,7 +49,7 @@ export const PINNED_PLUGIN_READ_RECORD_TYPES = Object.freeze(new Set([
  */
 export const PERMISSION_RECORD_ALIASES = Object.freeze({
   HeartRate: Object.freeze(['HeartRateSeries', 'HeartRate']),
-  ExerciseSession: Object.freeze(['ExerciseSession', 'ActivitySession']),
+  ExerciseSession: Object.freeze(['ActivitySession', 'ExerciseSession']),
 });
 
 export const RECORD_TYPE_FALLBACKS = Object.freeze({
@@ -60,6 +66,13 @@ export function grantedReadSet(existing) {
 
 export function aliasesForRecord(name) {
   return PERMISSION_RECORD_ALIASES[name] || [name];
+}
+
+/** Record type string for plugin readRecords(). */
+export function pluginReadRecordType(desiredName) {
+  if (desiredName === 'ExerciseSession') return 'ActivitySession';
+  if (desiredName === 'HeartRate') return 'HeartRateSeries';
+  return desiredName;
 }
 
 export function grantedCoversDesired(desiredName, grantedSet) {

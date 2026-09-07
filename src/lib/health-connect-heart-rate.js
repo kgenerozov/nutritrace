@@ -21,6 +21,31 @@ export function heartRateFromAggregates(aggregates) {
   return Math.round(value);
 }
 
+/**
+ * Parse BPM samples from plugin readRecords results without logging values.
+ * HeartRateRecord is converted via Kotlin toString() in the pinned plugin.
+ */
+export function heartRateFromRecords(records) {
+  if (!Array.isArray(records) || records.length === 0) return undefined;
+  const bpms = [];
+  for (const record of records) {
+    if (typeof record === 'string') {
+      for (const match of record.matchAll(/beatsPerMinute\s*=\s*(\d+(?:\.\d+)?)/gi)) {
+        const bpm = Number(match[1]);
+        if (Number.isFinite(bpm) && bpm > 0) bpms.push(bpm);
+      }
+      continue;
+    }
+    const samples = Array.isArray(record?.samples) ? record.samples : [record];
+    for (const sample of samples) {
+      const bpm = Number(sample?.beatsPerMinute ?? sample?.bpm ?? sample?.value);
+      if (Number.isFinite(bpm) && bpm > 0) bpms.push(bpm);
+    }
+  }
+  if (!bpms.length) return undefined;
+  return Math.round(bpms.reduce((sum, bpm) => sum + bpm, 0) / bpms.length);
+}
+
 export function sanitizeHealthConnectError(err) {
   const raw = err?.message ? String(err.message) : String(err || 'unknown error');
   return raw
@@ -29,10 +54,11 @@ export function sanitizeHealthConnectError(err) {
     .slice(0, 200);
 }
 
-export function classifyHeartRateRead({ permissionGranted, error, aggregates } = {}) {
+export function classifyHeartRateRead({ permissionGranted, error, aggregates, records } = {}) {
   if (!permissionGranted) return 'permission_denied';
   if (error) return 'read_error';
   if (heartRateFromAggregates(aggregates) != null) return 'available';
+  if (heartRateFromRecords(records) != null) return 'available';
   return 'no_records';
 }
 

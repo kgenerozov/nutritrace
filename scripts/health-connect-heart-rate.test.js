@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   classifyHeartRateRead,
   heartRateFromAggregates,
+  heartRateFromRecords,
   localMetricPresence,
   sanitizeHealthConnectError,
 } from '../src/lib/health-connect-heart-rate.js';
@@ -15,6 +16,7 @@ import {
   PINNED_PLUGIN_READ_RECORD_TYPES,
   grantedReadSet,
   missingPluginReadRecords,
+  pluginReadRecordType,
   reconcileReadPermissions,
   replaceInvalidPluginRecords,
   supportedDesiredReadRecords,
@@ -60,6 +62,8 @@ test('A: no permissions granted requests desired supported reads including Heart
   assert.ok(requested.includes('RestingHeartRate'));
   assert.ok(requested.includes('OxygenSaturation'));
   assert.ok(requested.includes('Steps'));
+  assert.ok(requested.includes('ActivitySession'));
+  assert.ok(!requested.includes('ExerciseSession'));
   assert.ok(result.read.includes('HeartRateSeries') || result.read.includes('HeartRate'));
 });
 
@@ -177,6 +181,8 @@ test('K: Steps / Sleep / SpO2 Health Connect paths remain in the sync reader', (
   assert.match(src, /type: 'SleepSession'/);
   assert.match(src, /type: 'OxygenSaturation'/);
   assert.match(src, /type: 'HeartRate'/);
+  assert.doesNotMatch(src, /type: 'ExerciseSession'/);
+  assert.match(src, /pluginReadRecordType\('ExerciseSession'\)/);
   assert.doesNotMatch(src, /if \(existing\.read\?\.length > 0\) return existing/);
   assert.match(src, /reconcileReadPermissions/);
   assert.match(src, /heartRateFromAggregates/);
@@ -200,4 +206,29 @@ test('unsupported names are filtered from the supported desired list', () => {
   assert.deepEqual(filtered, ['Steps', 'HeartRate']);
   assert.ok(PINNED_PLUGIN_READ_RECORD_TYPES.has('HeartRateSeries'));
   assert.ok(PINNED_PLUGIN_READ_RECORD_TYPES.has('OxygenSaturation'));
+});
+
+test('ExerciseSession is never sent to the pinned plugin', async () => {
+  const plugin = fakePlugin({ granted: [] });
+  await reconcileReadPermissions(plugin);
+  for (const requested of plugin.requests) {
+    assert.ok(!requested.includes('ExerciseSession'), requested.join(','));
+    assert.ok(requested.includes('ActivitySession'));
+  }
+  assert.equal(pluginReadRecordType('ExerciseSession'), 'ActivitySession');
+  assert.equal(pluginReadRecordType('HeartRate'), 'HeartRateSeries');
+  assert.ok(!PINNED_PLUGIN_READ_RECORD_TYPES.has('ExerciseSession'));
+});
+
+test('HeartRate records can supply avg when aggregate is the plugin zero default', () => {
+  assert.equal(heartRateFromAggregates([{ value: 0, min: 0, max: 0 }]), undefined);
+  const fromString = heartRateFromRecords([
+    'HeartRateRecord(samples=[Sample(beatsPerMinute=64), Sample(beatsPerMinute=72)])',
+  ]);
+  assert.equal(fromString, 68);
+  assert.equal(classifyHeartRateRead({
+    permissionGranted: true,
+    aggregates: [{ value: 0, min: 0, max: 0 }],
+    records: ['HeartRateRecord(samples=[Sample(beatsPerMinute=70)])'],
+  }), 'available');
 });

@@ -283,11 +283,12 @@
             {_hrPermBusy ? 'Requesting…' : 'Request missing permissions'}
           </button>
         </div>
-        {#if _hrCheck}
+            {#if _hrCheck}
           <pre class="setting-desc" style="line-height:1.5;white-space:pre-wrap;font-family:monospace;font-size:12px;margin:0">Health Connect: {_hrCheck.availability}
 READ_HEART_RATE: {_hrCheck.heartRatePermission}
 READ_RESTING_HEART_RATE: {_hrCheck.restingHeartRatePermission}
 HeartRate read: {_hrCheck.heartRateRead}
+HeartRate records: {_hrCheck.heartRateRecords ?? 'n/a'}
 avg_heart_rate local row: {_hrCheck.avgHeartRateLocal}
 resting_hr local row: {_hrCheck.restingHrLocal}{#if _hrCheck.error}
 

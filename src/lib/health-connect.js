@@ -29,11 +29,13 @@ import {
   DESIRED_READ_RECORD_TYPES,
   grantedCoversDesired,
   grantedReadSet,
+  pluginReadRecordType,
   reconcileReadPermissions,
 } from './health-connect-permissions.js';
 import {
   classifyHeartRateRead,
   heartRateFromAggregates,
+  heartRateFromRecords,
   localMetricPresence,
   sanitizeHealthConnectError,
 } from './health-connect-heart-rate.js';
@@ -43,6 +45,44 @@ export { DESIRED_READ_RECORD_TYPES };
 function _getPlugin() {
   if (!isNative) return null;
   return HealthConnect;
+}
+
+async function _readHeartRateRecords(hc, start, end) {
+  const types = [pluginReadRecordType('HeartRate'), 'HeartRate'];
+  const seen = new Set();
+  for (const type of types) {
+    if (seen.has(type)) continue;
+    seen.add(type);
+    try {
+      const { records } = await hc.readRecords({ start, end, type });
+      return Array.isArray(records) ? records : [];
+    } catch (e) {
+      const msg = String(e?.message || '');
+      if (/Unexpected RecordType/i.test(msg)) continue;
+      throw e;
+    }
+  }
+  return [];
+}
+
+async function _readHeartRate(hc, start, end) {
+  const { aggregates } = await hc.aggregateRecords({
+    start, end, type: 'HeartRate', groupBy: 'day',
+  });
+  const bucketCount = Array.isArray(aggregates) ? aggregates.length : 0;
+  let value = heartRateFromAggregates(aggregates);
+  let records = [];
+  if (value == null) {
+    records = await _readHeartRateRecords(hc, start, end);
+    value = heartRateFromRecords(records);
+  }
+  return {
+    value,
+    bucketCount,
+    recordCount: records.length,
+    aggregates: aggregates || [],
+    records,
+  };
 }
 
 /**
@@ -171,16 +211,14 @@ export async function readTodayData() {
     if (aggregates.length > 0) metrics.active_calories = Math.round(aggregates[0].value);
   } catch {}
 
-  // Heart rate (plugin aggregate uses BPM_AVG / MIN / MAX). A zero bucket
-  // is the plugin default when no samples exist — do not store 0 bpm.
+  // Heart rate. Aggregate uses the plugin switch name `HeartRate` and a
+  // full local-day window (same Samsung day-span reason as Steps, #93).
+  // A zero bucket is the plugin default when no samples exist — do not
+  // store 0 bpm. If aggregate is empty/zero, read HeartRateSeries records.
   try {
-    const { aggregates } = await hc.aggregateRecords({
-      start: todayStart, end: todayEnd,
-      type: 'HeartRate', groupBy: 'day',
-    });
-    _dlog('[health-connect] HeartRate aggregate buckets:', Array.isArray(aggregates) ? aggregates.length : 0);
-    const avgHr = heartRateFromAggregates(aggregates);
-    if (avgHr != null) metrics.avg_heart_rate = avgHr;
+    const hr = await _readHeartRate(hc, todayStart, startOfNextDay);
+    if (hr.value != null) metrics.avg_heart_rate = hr.value;
+    console.warn(`[health-connect] HeartRate: emitted=${hr.value != null ? 'yes' : 'no'} buckets=${hr.bucketCount} records=${hr.recordCount}`);
   } catch (e) {
     console.warn('[health-connect] HeartRate error:', sanitizeHealthConnectError(e));
   }
@@ -303,16 +341,13 @@ export async function readTodayData() {
   } catch {}
 
   // Exercise sessions — sum duration for the active_minutes metric.
-  // The permission dialog already requests ExerciseSession (line 64 above).
-  // Previously this block read 'ActivitySession' which isn't a real HC type,
-  // so it silently no-op'd on every device — Samsung Health writes
-  // ExerciseSession records, and workouts never reached the wellness metric
-  // OR the workouts table. Reported by traebertthomas-cpu (#91) with
-  // confirmation that duplaja (#89) independently hit the same gap.
+  // Pinned plugin RECORDS_TYPE_NAME_MAP key is ActivitySession (legacy
+  // name for ExerciseSessionRecord). Live logs: type ExerciseSession
+  // throws Unexpected RecordType / Invalid records specified.
   try {
     const { records } = await hc.readRecords({
       start: todayStart, end: todayEnd,
-      type: 'ExerciseSession',
+      type: pluginReadRecordType('ExerciseSession'),
     });
     if (records.length > 0) {
       let totalMin = 0;
@@ -549,11 +584,11 @@ export async function readExerciseSessions(fromIso, toIso) {
   let sessions = [];
   try {
     const { records } = await hc.readRecords({
-      start: fromIso, end: toIso, type: 'ExerciseSession',
+      start: fromIso, end: toIso, type: pluginReadRecordType('ExerciseSession'),
     });
     sessions = records || [];
   } catch (e) {
-    _dlog(`[health-connect] ExerciseSession read failed: ${e?.message}`);
+    console.warn('[health-connect] ExerciseSession read failed:', sanitizeHealthConnectError(e));
     return [];
   }
 
@@ -684,7 +719,8 @@ export async function syncHealthConnect(dateStr) {
     _dlog(`[health-connect] snapshot failed: ${e?.message}`);
   }
 
-  _dlog(`[health-connect] Synced ${Object.keys(metrics).length} metrics + ${workoutCount} workouts for ${dateStr}`);
+  _dlog(`[health-connect] Synced ${Object.keys(metrics).join(',') || 'none'} + ${workoutCount} workouts for ${dateStr}`);
+  console.warn(`[health-connect] Synced metric types: ${Object.keys(metrics).join(',') || 'none'}; avg_heart_rate=${metrics.avg_heart_rate != null ? 'present' : 'absent'}`);
   return metrics;
 }
 
@@ -737,16 +773,17 @@ export async function checkHeartRateStatus(options = {}) {
 
   const permissionGranted = status.heartRatePermission === 'granted';
   let aggregates = [];
+  let records = [];
   let readError = null;
   if (permissionGranted) {
     try {
       const now = new Date();
       const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
-      const todayEnd = now.toISOString();
-      const response = await hc.aggregateRecords({
-        start: todayStart, end: todayEnd, type: 'HeartRate', groupBy: 'day',
-      });
-      aggregates = response?.aggregates || [];
+      const startOfNextDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).toISOString();
+      const hr = await _readHeartRate(hc, todayStart, startOfNextDay);
+      aggregates = hr.aggregates;
+      records = hr.records;
+      status.heartRateRecords = hr.recordCount;
     } catch (e) {
       readError = e;
       status.error = sanitizeHealthConnectError(e);
@@ -756,6 +793,7 @@ export async function checkHeartRateStatus(options = {}) {
     permissionGranted,
     error: readError,
     aggregates,
+    records,
   });
 
   try {
