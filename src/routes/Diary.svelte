@@ -58,6 +58,7 @@
   import { DB, localDateStr } from '../lib/db.js';
   import { portal } from '../lib/portal.js';
   import { Nutrition, NUTRIMENTS } from '../lib/nutrition.js';
+  import { resolveGoalForLocalDate } from '../lib/goal-resolve.js';
   import { readBodyStat, tagBodyStats, LENGTH_KEYS } from '../lib/body-stats-unit.js';
   import { decimalInput, parseDecimal } from '../lib/decimal-input.js';
 
@@ -397,7 +398,7 @@
   let _dynamicGoalDate    = null;   // which diary date we fetched for
   // Adaptive TDEE — server-computed; cached once per page load
   let _adaptiveTdee = null;
-  $: _fixedGoal = ($goals && $goals.calories) ? ($goals.calories.max || $goals.calories.min || 2000) : 2000;
+  $: _fixedGoal = resolveGoalForLocalDate($goals?.calories, $currentDate, 2000);
   $: caloriesGoal =
        ($calorieGoalMode === 'dynamic' && _dynamicCaloriesOut != null)
          ? Math.round(_dynamicCaloriesOut * $calorieGoalFactor)
@@ -1024,13 +1025,16 @@
         const g = $goals[n.id];
         let tgt = null;
         if (g) {
-          const raw = g.max ?? g.min ?? null;
-          if (raw != null && g.isPercent) {
-            const density = {fat:9,'saturated-fat':9,carbohydrates:4,sugars:4,proteins:4}[n.id];
-            const calGoal = $goals.calories?.max ?? $goals.calories?.min ?? 2000;
-            tgt = density ? Math.round(calGoal * raw / 100 / density) : raw;
+          if (n.id === 'calories') {
+            tgt = caloriesGoal;
           } else {
-            tgt = raw;
+            const raw = g.max ?? g.min ?? null;
+            if (raw != null && g.isPercent) {
+              const density = {fat:9,'saturated-fat':9,carbohydrates:4,sugars:4,proteins:4}[n.id];
+              tgt = density ? Math.round(caloriesGoal * raw / 100 / density) : raw;
+            } else {
+              tgt = raw;
+            }
           }
         }
         const cur = totals[n.id] || 0;
