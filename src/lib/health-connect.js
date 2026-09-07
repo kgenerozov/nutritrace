@@ -26,6 +26,11 @@ const _dlog = import.meta.env.DEV
 import { isNative } from './platform.js';
 import { HealthConnect } from '@devmaxime/capacitor-health-connect';
 import { BACKFILL_UTILITY } from './backfill-flag.js';
+import {
+  DESIRED_READ_RECORD_TYPES,
+  reconcileReadPermissions,
+} from './health-connect-permissions.js';
+import { sanitizeHealthConnectError } from './health-connect-heart-rate.js';
 
 function _getPlugin() {
   if (!isNative) return null;
@@ -48,42 +53,31 @@ export async function checkAvailability() {
 }
 
 /**
- * Request read/write permissions from Health Connect.
+ * Request read permissions from Health Connect.
+ *
+ * Reconciles the canonical desired record list against currently granted
+ * reads. Having *any* read permission is not sufficient — missing types
+ * such as HeartRate / RestingHeartRate / BodyWaterMass must still be requested.
+ *
+ * Uses pinned-plugin aliases: HeartRate → HeartRateSeries,
+ * ExerciseSession → ActivitySession. Unsupported names are retried so one
+ * invalid type cannot reject the whole dialog.
  */
 export async function requestPermissions() {
   const hc = _getPlugin();
   if (!hc) return { read: [], write: [] };
   try {
-    // First check if permissions are already granted (avoids triggering crash-prone dialog)
-    const existing = await getGrantedPermissions();
-    if (existing.read?.length > 0) return existing;
-
-    // Request permissions via Health Connect dialog
-    let result;
-    try {
-      result = await hc.requestPermissions({
-        read: ['Steps', 'Weight', 'SleepSession', 'HeartRate', 'ExerciseSession', 'BloodPressure', 'OxygenSaturation', 'BodyFat', 'RespiratoryRate', 'FloorsClimbed', 'Hydration', 'BoneMass', 'LeanBodyMass', 'BodyTemperature', 'BasalMetabolicRate', 'Vo2Max'],
-        write: [],
-      });
-    } catch (e) {
-      console.warn('[health-connect] Permission dialog failed:', e.message);
-      result = { read: [], write: [] };
-    }
-    // Check if permissions were actually granted (singleTask launch mode can cause
-    // the permission dialog to close immediately without user interaction)
-    if (result.read?.length === 0) {
-      // Fallback: open Health Connect app so user can grant permissions manually
+    const before = await getGrantedPermissions();
+    const result = await reconcileReadPermissions(hc, { desired: DESIRED_READ_RECORD_TYPES });
+    if (result.requested?.length && !(result.read?.length)) {
       console.warn('[health-connect] Permission dialog failed — opening Health Connect app');
       try {
-        const { App: CapApp } = await import('@capacitor/app');
-        // Open Health Connect's permission management for our app
         window.open('market://details?id=com.google.android.apps.healthdata', '_system');
       } catch {}
-      return { read: [], write: [] };
     }
-    return result;
+    return { read: result.read || before.read || [], write: result.write || [] };
   } catch (e) {
-    console.error('[health-connect] Permission request failed:', e);
+    console.error('[health-connect] Permission request failed:', sanitizeHealthConnectError(e));
     return { read: [], write: [] };
   }
 }

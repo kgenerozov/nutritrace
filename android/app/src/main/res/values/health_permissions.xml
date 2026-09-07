@@ -18,6 +18,7 @@
         <item>android.permission.health.READ_HYDRATION</item>
         <item>android.permission.health.READ_BONE_MASS</item>
         <item>android.permission.health.READ_LEAN_BODY_MASS</item>
+        <item>android.permission.health.READ_BODY_WATER_MASS</item>
         <item>android.permission.health.READ_BODY_TEMPERATURE</item>
         <item>android.permission.health.READ_BASAL_METABOLIC_RATE</item>
         <item>android.permission.health.READ_VO2_MAX</item>

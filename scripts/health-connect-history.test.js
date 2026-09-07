@@ -8,6 +8,7 @@ import {
   SOURCE,
   addLocalCalendarDays,
   applyNumericPolicy,
+  classifyScanError,
   countInclusiveDays,
   defaultFamilySelection,
   earliestWithoutHistory,
@@ -19,6 +20,8 @@ import {
   localDayBounds,
   naturalKey,
   parseIsoDate,
+  parseRecordValue,
+  parseRestingHr,
   pickLatestRecord,
   scanRange,
   selectSleepForLocalDate,
@@ -27,6 +30,8 @@ import {
   utcSubstringDate,
   validateRange,
 } from '../src/lib/health-connect-history.js';
+import { pluginReadRecordType } from '../src/lib/health-connect-permissions.js';
+import { wattsToKcalPerDay } from '../src/lib/health-connect-body-composition.js';
 
 test('invalid dates, from>to, future range, local-day iteration', () => {
   assert.equal(parseIsoDate('2026-02-30'), null);
@@ -305,6 +310,8 @@ test('backfill APK identity, history permission, workers disabled, no workout im
   const hcSync = readFileSync('src/lib/health-connect.js', 'utf8');
   assert.match(hcSync, /BACKFILL_UTILITY/);
   assert.match(hcSync, /do not import ExerciseSession as workouts/);
+  assert.match(hcSync, /reconcileReadPermissions/);
+  assert.doesNotMatch(hcSync, /read: \['Steps', 'Weight', 'SleepSession', 'HeartRate', 'ExerciseSession'/);
 
   const worker = readFileSync('android/app/src/main/java/com/nutritrace/app/WorkerScheduler.java', 'utf8');
   assert.match(worker, /backfill APK: workers disabled/);
@@ -314,8 +321,14 @@ test('backfill APK identity, history permission, workers disabled, no workout im
   const gradle = readFileSync('android/app/build.gradle', 'utf8');
   assert.match(gradle, /applicationId "com.nutritrace.app.backfill"/);
 
+  const dbNative = readFileSync('src/lib/db-native.js', 'utf8');
+  assert.match(dbNative, /const DB_NAME = 'nutritrace_local'/);
+  assert.match(dbNative, /sync_status='pending'/);
+
   const manifest = readFileSync('android/app/src/main/AndroidManifest.xml', 'utf8');
   assert.match(manifest, /android.permission.health.READ_HEALTH_DATA_HISTORY/);
+  assert.match(manifest, /android.permission.health.READ_BODY_WATER_MASS/);
+  assert.match(manifest, /android.permission.health.READ_HYDRATION/);
 
   const plugin = readFileSync('android/app/src/main/java/com/nutritrace/app/HealthConnectHistoryPlugin.kt', 'utf8');
   assert.match(plugin, /FEATURE_READ_HEALTH_DATA_HISTORY/);
@@ -342,3 +355,159 @@ test('sanitize summary has counts not a values dump contract', async () => {
   assert.equal(summary.workouts_written, 0);
   assert.equal(summary.row_count, 1);
 });
+
+test('HeartRate alias, zero bucket is not stored, records fallback used', async () => {
+  assert.equal(pluginReadRecordType('HeartRate'), 'HeartRateSeries');
+  assert.equal(pluginReadRecordType('ExerciseSession'), 'ActivitySession');
+
+  const hcZero = {
+    async aggregateRecords() { return { aggregates: [{ value: 0, min: 0, max: 0 }] }; },
+    async readRecords() { return { records: [] }; },
+  };
+  const zeroScan = await scanRange({
+    hc: hcZero,
+    from: '2026-09-06',
+    to: '2026-09-06',
+    today: '2026-09-06',
+    familySelection: { heart: true },
+    history: { featureAvailable: true, permissionGranted: true },
+  });
+  assert.equal(zeroScan.rows.find(r => r.metric_type === 'avg_heart_rate'), undefined);
+
+  let requestedTypes = [];
+  const hcFallback = {
+    async aggregateRecords() { return { aggregates: [{ value: 0, min: 0, max: 0 }] }; },
+    async readRecords({ type }) {
+      requestedTypes.push(type);
+      if (type === 'HeartRateSeries') {
+        return { records: ['HeartRateRecord(time=2026-09-06T08:00:00Z, samples=[Sample(beatsPerMinute=72)])'] };
+      }
+      return { records: [] };
+    },
+  };
+  const fallbackScan = await scanRange({
+    hc: hcFallback,
+    from: '2026-09-06',
+    to: '2026-09-06',
+    today: '2026-09-06',
+    familySelection: { heart: true },
+    history: { featureAvailable: true, permissionGranted: true },
+  });
+  assert.equal(fallbackScan.rows.find(r => r.metric_type === 'avg_heart_rate')?.value, 72);
+  assert.ok(requestedTypes.includes('HeartRateSeries'));
+});
+
+test('RestingHeartRate missing is not derived from avg HR; string BPM parsed; zero skipped', async () => {
+  assert.equal(parseRestingHr('RestingHeartRateRecord(time=2026-09-06T08:00:00Z, beatsPerMinute=54, metadata=x)'), 54);
+  assert.equal(parseRestingHr({ beatsPerMinute: 0 }), null);
+  const hc = {
+    async aggregateRecords() { return { aggregates: [{ value: 80, min: 60, max: 100 }] }; },
+    async readRecords({ type }) {
+      if (type === 'RestingHeartRate') return { records: [] };
+      return { records: [] };
+    },
+  };
+  const scan = await scanRange({
+    hc,
+    from: '2026-09-06',
+    to: '2026-09-06',
+    today: '2026-09-06',
+    familySelection: { heart: true, resting_hr: true },
+    history: { featureAvailable: true, permissionGranted: true },
+  });
+  assert.equal(scan.rows.find(r => r.metric_type === 'avg_heart_rate')?.value, 80);
+  assert.equal(scan.rows.find(r => r.metric_type === 'resting_hr'), undefined);
+});
+
+test('Lean/Bone/BodyWater string parsers; BMR watts converted; parse failure is not zero', async () => {
+  const lean = parseRecordValue(
+    'LeanBodyMassRecord(time=2026-01-15T12:00:00Z, zoneOffset=+00:00, mass=54.2 kilograms, metadata=Metadata(id=1))',
+    'massKg',
+  );
+  const bone = parseRecordValue(
+    'BoneMassRecord(time=2026-01-15T12:00:00Z, zoneOffset=+00:00, mass=2.41 kilograms, metadata=Metadata(id=1))',
+    'massKg',
+  );
+  const water = parseRecordValue(
+    'BodyWaterMassRecord(time=2026-01-15T12:00:00Z, zoneOffset=+00:00, mass=35.0 kilograms, metadata=Metadata(id=1))',
+    'massKg',
+  );
+  const bmrWatts = parseRecordValue(
+    'BasalMetabolicRateRecord(time=2026-01-15T12:00:00Z, zoneOffset=+00:00, basalMetabolicRate=80.0 Watts, metadata=Metadata(id=1))',
+    'bmr',
+  );
+  assert.equal(lean, 54.2);
+  assert.equal(bone, 2.41);
+  assert.equal(water, 35);
+  assert.ok(bmrWatts != null);
+  assert.notEqual(bmrWatts, 80);
+  assert.equal(Math.round(bmrWatts), Math.round(wattsToKcalPerDay(80)));
+  assert.equal(parseRecordValue('LeanBodyMassRecord(time=2026-01-15T12:00:00Z, mass=not-a-mass, metadata=x)', 'massKg'), null);
+  assert.equal(applyNumericPolicy(null, { zeroValid: false }), null);
+});
+
+test('BodyWaterMass is distinct from Hydration; derived body_water_pct when weight exists', async () => {
+  const hc = {
+    async aggregateRecords({ type }) {
+      if (type === 'Hydration') return { aggregates: [{ value: 1.5 }] };
+      return { aggregates: [] };
+    },
+    async readRecords({ type }) {
+      if (type === 'Weight') return { records: [{ time: '2026-09-06T08:00:00Z', weight: { inKilograms: 70 } }] };
+      if (type === 'BodyWaterMass') {
+        return {
+          records: ['BodyWaterMassRecord(time=2026-09-06T08:00:00Z, zoneOffset=+00:00, mass=35.0 kilograms, metadata=Metadata(id=1))'],
+        };
+      }
+      return { records: [] };
+    },
+  };
+  const scan = await scanRange({
+    hc,
+    from: '2026-09-06',
+    to: '2026-09-06',
+    today: '2026-09-06',
+    familySelection: { body: true, activity_extra: true },
+    history: { featureAvailable: true, permissionGranted: true },
+  });
+  const byType = Object.fromEntries(scan.rows.map(r => [r.metric_type, r.value]));
+  assert.equal(byType.weight_kg, 70);
+  assert.equal(byType.body_water_kg, 35);
+  assert.equal(byType.body_water_pct, 50);
+  assert.equal(byType.water_ml, 1500);
+  assert.notEqual(byType.body_water_kg, byType.water_ml);
+  assert.ok(selectedMetrics({ body: true }).some(m => m.hcType === 'BodyWaterMass'));
+  assert.ok(selectedMetrics({ activity_extra: true }).some(m => m.hcType === 'Hydration'));
+});
+
+test('scan warnings collect sanitized classes without aborting other metrics', async () => {
+  assert.equal(classifyScanError(new Error('SecurityException: permission')), 'missing_permission');
+  assert.equal(classifyScanError(new Error('Unexpected RecordType BodyWaterMass')), 'unsupported_type');
+  const hc = {
+    async aggregateRecords({ type }) {
+      if (type === 'Steps') return { aggregates: [{ value: 10 }] };
+      throw new Error('read failed');
+    },
+    async readRecords({ type }) {
+      if (type === 'BodyWaterMass') throw new Error('Missing permission for BodyWaterMass');
+      if (type === 'RestingHeartRate') return { records: [] };
+      return { records: [] };
+    },
+  };
+  const scan = await scanRange({
+    hc,
+    from: '2026-09-06',
+    to: '2026-09-06',
+    today: '2026-09-06',
+    familySelection: { steps: true, body: true, resting_hr: true },
+    history: { featureAvailable: true, permissionGranted: true },
+  });
+  assert.equal(scan.rows.find(r => r.metric_type === 'steps')?.value, 10);
+  const summary = summarizeScan(scan);
+  const byType = Object.fromEntries((summary.warnings || []).map(w => [w.hcType, w.error_class]));
+  assert.equal(byType.BodyWaterMass, 'missing_permission');
+  assert.equal(byType.RestingHeartRate, 'no_records');
+  const dumped = JSON.stringify(summary);
+  assert.doesNotMatch(dumped, /"value":/);
+});
+

@@ -1,5 +1,6 @@
 <script>
   import Toggle from './Toggle.svelte';
+  import { onMount } from 'svelte';
   import { isNative } from '../../lib/platform.js';
   import { HealthConnect } from '@devmaxime/capacitor-health-connect';
   import { requestPermissions } from '../../lib/health-connect.js';
@@ -13,6 +14,11 @@
     scanRange,
     summarizeScan,
   } from '../../lib/health-connect-history.js';
+  import {
+    formatPendingDiagnostics,
+    pushPendingToServer,
+    summarizePendingWellness,
+  } from '../../lib/health-connect-history-pending.js';
   import { showError, showSuccess } from '../../stores/toast.js';
 
   function todayLocal() {
@@ -33,6 +39,8 @@
   let scanSummary = null;
   let lastScan = null;
   let importResult = null;
+  let pendingDiag = null;
+  let pushResult = null;
 
   const familyLabels = {
     steps: 'Steps (core)',
@@ -56,6 +64,66 @@
       history = { featureAvailable: false, permissionGranted: false, feature: 'unavailable', permission: 'unavailable' };
       statusText = e.message || 'History access status failed';
     }
+  }
+
+  async function refreshPendingDiagnostics() {
+    try {
+      const { dbGetPendingChanges } = await import('../../lib/db-native.js');
+      const pending = await dbGetPendingChanges();
+      pendingDiag = summarizePendingWellness(pending.wellness || []);
+    } catch (e) {
+      pendingDiag = { pending_count: 0, sources: {}, earliest: null, latest: null, distinct_metric_types: 0 };
+      statusText = e.message || 'Could not read pending wellness rows';
+    }
+  }
+
+  function pushDeps() {
+    return import('../../lib/db-native.js').then(async (db) => {
+      const { fullSync } = await import('../../lib/sync.js');
+      const { getServerUrl, getAuthToken } = await import('../../lib/platform.js');
+      return {
+        getPendingChanges: db.dbGetPendingChanges,
+        getServerUrl,
+        getAuthToken,
+        fullSync,
+      };
+    });
+  }
+
+  function applyPushResult(result, { afterImport = false } = {}) {
+    pushResult = result;
+    pendingDiag = result.pendingAfter || pendingDiag;
+    const pendingLine = formatPendingDiagnostics(result.pendingAfter || result.pendingBefore);
+    if (result.status === 'pass') {
+      statusText = [
+        afterImport ? 'Local import complete.' : null,
+        `Server push: ${result.server_push}`,
+        `Pending before: ${result.pendingBefore.pending_count}`,
+        `Pending after: ${result.pendingAfter.pending_count}`,
+      ].filter(Boolean).join(' ');
+      showSuccess(result.message);
+      return;
+    }
+    if (result.status === 'no_pending') {
+      statusText = afterImport
+        ? `Local import complete. ${result.message}`
+        : result.message;
+      return;
+    }
+    if (result.status === 'not_connected' || result.status === 'not_authenticated') {
+      const imported = afterImport
+        ? `Imported locally. ${result.pendingBefore.pending_count} rows remain pending. `
+        : '';
+      statusText = `${imported}${result.message} Then tap Push pending to server.`;
+      showError(result.message);
+      return;
+    }
+    statusText = [
+      afterImport ? `Imported locally. ${result.pendingBefore.pending_count} rows remain pending.` : null,
+      result.message,
+      pendingLine,
+    ].filter(Boolean).join('\n');
+    showError(result.message);
   }
 
   async function grantReads() {
@@ -97,7 +165,7 @@
     scanSummary = null;
     lastScan = null;
     importResult = null;
-    statusText = 'Scanning…';
+    statusText = 'Health Connect historical scan…';
     try {
       await refreshHistory();
       const today = todayLocal();
@@ -120,7 +188,7 @@
         history,
       });
       scanSummary = summarizeScan(lastScan);
-      statusText = `Scan complete. ${scanSummary.row_count} local rows would be written. Exercise/workout import is off.`;
+      statusText = `Health Connect historical scan complete. ${scanSummary.row_count} local rows would be written. Exercise/workout import is off.`;
     } catch (e) {
       const code = e.code || e.message;
       if (code === 'HISTORY_DENIED' || code === 'HISTORY_UNAVAILABLE') {
@@ -140,21 +208,43 @@
       return;
     }
     busy = true;
-    statusText = 'Importing…';
+    statusText = 'Local import…';
     try {
       const { dbUpsertWellness } = await import('../../lib/db-native.js');
       importResult = await importScan(lastScan, dbUpsertWellness);
-      statusText = `Imported ${importResult.unique_keys} wellness keys as source=health_connect. Open Wellness and tap Sync to push to the server. Uninstall this Backfill app after a successful sync.`;
-      showSuccess('Historical import wrote pending wellness rows');
+      await refreshPendingDiagnostics();
+      statusText = `Local import wrote ${importResult.unique_keys} wellness keys as source=health_connect. Attempting server push…`;
+      const result = await pushPendingToServer(await pushDeps());
+      applyPushResult(result, { afterImport: true });
     } catch (e) {
       showError(e.message || 'Import failed');
       statusText = e.message || 'Import failed';
+      await refreshPendingDiagnostics();
     } finally {
       busy = false;
     }
   }
 
-  refreshHistory();
+  async function runPushPending() {
+    busy = true;
+    statusText = 'Server push…';
+    try {
+      await refreshPendingDiagnostics();
+      const result = await pushPendingToServer(await pushDeps());
+      applyPushResult(result);
+    } catch (e) {
+      showError(e.message || 'Server push failed');
+      statusText = e.message || 'Server push failed';
+      await refreshPendingDiagnostics();
+    } finally {
+      busy = false;
+    }
+  }
+
+  onMount(() => {
+    refreshHistory();
+    refreshPendingDiagnostics();
+  });
 </script>
 
 {#if isNative}
@@ -162,11 +252,17 @@
   <div class="setting-row" style="flex-direction:column;align-items:flex-start;gap:10px">
     <span class="setting-label">Health Connect Historical Import</span>
     <p class="setting-desc" style="line-height:1.5">
-      One-time operational tool. Reads historical Health Connect data into local wellness rows
-      with source <code>health_connect</code>, then uses normal NutriTrace sync. Exercise sessions
+      One-time operational tool. Scan Health Connect history, import local wellness
+      rows with source <code>health_connect</code>, then this screen pushes pending
+      rows to the personal NutriTrace server. Do not use the Wellness Health Connect
+      button for this delivery — that only re-reads today. Exercise sessions
       are never imported as workouts. Calories are observational and off by default.
-      Missing data is not written as zero. Uninstall this Backfill app after a successful import.
+      Missing data is not written as zero. Uninstall this Backfill app only after
+      Server push PASS and pending after 0.
     </p>
+    <div class="setting-desc" style="width:100%;font-family:monospace;font-size:12px;line-height:1.5;white-space:pre-wrap">
+{pendingDiag ? formatPendingDiagnostics(pendingDiag) : 'Pending wellness rows: loading…'}
+    </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;width:100%">
       <label class="form-label" style="flex:1;min-width:140px">From
         <input class="input" type="date" bind:value={fromDate} disabled={busy} />
@@ -185,7 +281,7 @@
       <button class="btn btn-secondary" style="height:40px;font-size:13px" disabled={busy} on:click={grantHistory}>
         Access past data
       </button>
-      <button class="btn btn-secondary" style="height:40px;font-size:13px" disabled={busy} on:click={refreshHistory}>
+      <button class="btn btn-secondary" style="height:40px;font-size:13px" disabled={busy} on:click={() => { refreshHistory(); refreshPendingDiagnostics(); }}>
         Refresh status
       </button>
     </div>
@@ -205,23 +301,43 @@
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn btn-secondary" style="height:40px;font-size:13px" disabled={busy} on:click={runScan}>Scan</button>
-      <button class="btn btn-primary" style="height:40px;font-size:13px" disabled={busy || !lastScan} on:click={runImport}>Import</button>
+      <button class="btn btn-primary" style="height:40px;font-size:13px" disabled={busy || !lastScan} on:click={runImport}>Import &amp; Push</button>
+      <button class="btn btn-primary" style="height:40px;font-size:13px" disabled={busy} on:click={runPushPending}>
+        Push pending to server
+      </button>
     </div>
     {#if statusText}
-      <p class="setting-desc" style="line-height:1.5">{statusText}</p>
+      <p class="setting-desc" style="line-height:1.5;white-space:pre-wrap">{statusText}</p>
+    {/if}
+    {#if pushResult}
+      <div class="setting-desc" style="width:100%;font-family:monospace;font-size:12px;line-height:1.5;white-space:pre-wrap">
+Server push: {pushResult.server_push || '—'}
+Pending before: {pushResult.pendingBefore?.pending_count ?? '—'}
+Pending after: {pushResult.pendingAfter?.pending_count ?? '—'}
+{#if pushResult.retry_available}
+Retry available without Scan or Import.
+{/if}
+      </div>
     {/if}
     {#if scanSummary}
       <div class="setting-desc" style="width:100%;font-family:monospace;font-size:12px;line-height:1.5;white-space:pre-wrap">
+Health Connect historical scan
 Range {scanSummary.from} … {scanSummary.to}
 Rows {scanSummary.row_count}
 Workouts written {scanSummary.workouts_written}
 {#each Object.entries(scanSummary.metrics) as [metric, info]}
 {metric}: {info.dates_with_data} dates, {info.earliest || '—'} … {info.latest || '—'}
 {/each}
+{#if scanSummary.warnings?.length}
+Warnings:
+{#each scanSummary.warnings as w}
+{w.hcType || w.metric_type}: {w.error_class}
+{/each}
+{/if}
       </div>
     {/if}
     {#if importResult}
-      <p class="setting-desc">Wrote {importResult.unique_keys} keys. After Sync, uninstall NutriTrace Backfill.</p>
+      <p class="setting-desc">Local import wrote {importResult.unique_keys} keys.</p>
     {/if}
   </div>
 {/if}

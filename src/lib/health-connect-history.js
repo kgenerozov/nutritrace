@@ -5,7 +5,21 @@
  * assigned to the requested YYYY-MM-DD. Never use UTC ISO substring dates.
  *
  * This module does not import ExerciseSession as workouts.
+ * ExerciseSession / ActivitySession aliases exist only so permission
+ * reconciliation matches the pinned plugin; historical workout import stays off.
  */
+
+import { pluginReadRecordType } from './health-connect-permissions.js';
+import {
+  applyHealthConnectBodyDerivations,
+  parseBasalMetabolicRateKcalDay,
+  parseMassKg,
+  parsePercentage,
+} from './health-connect-body-composition.js';
+import {
+  heartRateFromAggregates,
+  heartRateFromRecords,
+} from './health-connect-heart-rate.js';
 
 export const SOURCE = 'health_connect';
 export const HISTORY_WINDOW_DAYS = 30;
@@ -27,7 +41,7 @@ export const METRIC_FAMILIES = {
   },
   heart: {
     defaultOn: true,
-    metrics: [{ metricType: 'avg_heart_rate', kind: 'aggregate', hcType: 'HeartRate', round: true, zeroValid: false }],
+    metrics: [{ metricType: 'avg_heart_rate', kind: 'heart', hcType: 'HeartRate', round: true, zeroValid: false }],
   },
   resting_hr: {
     defaultOn: true,
@@ -44,6 +58,7 @@ export const METRIC_FAMILIES = {
       { metricType: 'body_fat_pct', kind: 'records', hcType: 'BodyFat', parser: 'percent', zeroValid: false },
       { metricType: 'lean_mass_kg', kind: 'records', hcType: 'LeanBodyMass', parser: 'massKg', digits: 1, zeroValid: false },
       { metricType: 'bone_mass_kg', kind: 'records', hcType: 'BoneMass', parser: 'massKg', digits: 2, zeroValid: false },
+      { metricType: 'body_water_kg', kind: 'records', hcType: 'BodyWaterMass', parser: 'massKg', digits: 1, zeroValid: false },
     ],
   },
   spo2: {
@@ -52,7 +67,7 @@ export const METRIC_FAMILIES = {
   },
   bmr: {
     defaultOn: true,
-    metrics: [{ metricType: 'basal_metabolic_rate', kind: 'records', hcType: 'BasalMetabolicRate', parser: 'bmr', zeroValid: false }],
+    metrics: [{ metricType: 'basal_metabolic_rate', kind: 'records', hcType: 'BasalMetabolicRate', parser: 'bmr', round: true, zeroValid: false }],
   },
   vitals: {
     defaultOn: true,
@@ -242,18 +257,30 @@ export function selectedMetrics(familySelection) {
 }
 
 export function recordTimestamp(record) {
-  if (!record || typeof record !== 'object') return null;
-  const raw = record.endTime || record.time || record.startTime || record.timestamp;
+  if (record == null) return null;
+  let raw = null;
+  if (typeof record === 'string') {
+    const match = record.match(/\b(?:endTime|startTime|time)=([^\s,]+)/);
+    raw = match ? match[1] : null;
+  } else if (typeof record === 'object') {
+    raw = record.endTime || record.time || record.startTime || record.timestamp;
+  }
   if (!raw) return null;
   const ms = new Date(raw).getTime();
   return Number.isNaN(ms) ? null : ms;
 }
 
 export function pickLatestRecord(records) {
-  const valid = (records || []).filter(r => recordTimestamp(r) != null);
-  if (!valid.length) return null;
-  valid.sort((a, b) => recordTimestamp(a) - recordTimestamp(b));
-  return valid[valid.length - 1];
+  const list = records || [];
+  const valid = list.filter(r => recordTimestamp(r) != null);
+  if (valid.length) {
+    valid.sort((a, b) => recordTimestamp(a) - recordTimestamp(b));
+    return valid[valid.length - 1];
+  }
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i] != null && list[i] !== '') return list[i];
+  }
+  return null;
 }
 
 function num(value) {
@@ -264,26 +291,13 @@ function num(value) {
 export function parseRecordValue(record, parser) {
   if (record == null) return null;
   if (parser === 'bloodPressure') return parseBloodPressure(record);
+  if (parser === 'weightKg' || parser === 'massKg') return parseMassKg(record);
+  if (parser === 'percent') return parsePercentage(record);
+  if (parser === 'bmr') return parseBasalMetabolicRateKcalDay(record);
+  if (parser === 'restingHr') return parseRestingHr(record);
   if (typeof record === 'string') return parseStringRecord(record, parser);
 
   switch (parser) {
-    case 'weightKg': {
-      let wkg = record.weight?.inKilograms ?? record.mass?.inKilograms ?? record.value;
-      if (typeof wkg === 'object') wkg = wkg?.inKilograms ?? wkg?.value;
-      return num(wkg);
-    }
-    case 'massKg': {
-      let kg = record.mass?.inKilograms ?? record.value;
-      if (typeof kg === 'object') kg = kg?.inKilograms ?? kg?.value;
-      return num(kg);
-    }
-    case 'percent': {
-      let pct = record.percentage?.value ?? record.percentage ?? record.value;
-      if (typeof pct === 'object') pct = pct?.value;
-      return num(pct);
-    }
-    case 'restingHr':
-      return num(record.beatsPerMinute ?? record.value);
     case 'rate':
       return num(record.rate ?? record.value);
     case 'celsius': {
@@ -291,8 +305,6 @@ export function parseRecordValue(record, parser) {
       if (typeof c === 'object') c = c?.inCelsius ?? c?.value;
       return num(c);
     }
-    case 'bmr':
-      return num(record.basalMetabolicRate?.inKilocaloriesPerDay ?? record.value);
     case 'vo2':
       return num(record.vo2MillilitersPerMinuteKilogram ?? record.value);
     default:
@@ -300,15 +312,22 @@ export function parseRecordValue(record, parser) {
   }
 }
 
+export function parseRestingHr(record) {
+  if (record == null) return null;
+  if (typeof record === 'string') {
+    const match = record.match(/beatsPerMinute\s*=\s*(\d+(?:\.\d+)?)/i);
+    const bpm = match ? num(match[1]) : null;
+    return bpm != null && bpm > 0 ? bpm : null;
+  }
+  const bpm = num(record.beatsPerMinute ?? record.value);
+  return bpm != null && bpm > 0 ? bpm : null;
+}
+
 function parseStringRecord(text, parser) {
-  if (parser === 'weightKg' || parser === 'massKg') {
-    const match = text.match(/value=([\d.]+)/);
-    return match ? num(match[1]) : null;
-  }
-  if (parser === 'percent') {
-    const match = text.match(/percentage=([\d.]+)%/);
-    return match ? num(match[1]) : null;
-  }
+  if (parser === 'weightKg' || parser === 'massKg') return parseMassKg(text);
+  if (parser === 'percent') return parsePercentage(text);
+  if (parser === 'bmr') return parseBasalMetabolicRateKcalDay(text);
+  if (parser === 'restingHr') return parseRestingHr(text);
   if (parser === 'bloodPressure') {
     const sys = text.match(/systolic=([\d.]+)/);
     const dia = text.match(/diastolic=([\d.]+)/);
@@ -319,6 +338,41 @@ function parseStringRecord(text, parser) {
     };
   }
   return null;
+}
+
+export function classifyScanError(err) {
+  const msg = String(err?.message || err || '');
+  if (/permission|securityexception|not\s+granted|denied/i.test(msg)) return 'missing_permission';
+  if (/invalid|unsupported|unexpected recordtype|unknown type/i.test(msg)) return 'unsupported_type';
+  if (/parse/i.test(msg)) return 'parse_error';
+  return 'read_error';
+}
+
+const WARNING_PRIORITY = {
+  missing_permission: 0,
+  unsupported_type: 1,
+  parse_error: 2,
+  read_error: 3,
+  no_records: 4,
+};
+
+function noteWarning(scan, spec, errorClass) {
+  if (!scan.warningState) scan.warningState = {};
+  const key = spec.hcType || spec.metricType;
+  const prev = scan.warningState[key];
+  const nextPri = WARNING_PRIORITY[errorClass] ?? 99;
+  const prevPri = prev ? (WARNING_PRIORITY[prev.error_class] ?? 99) : 99;
+  if (prev && prevPri <= nextPri) return;
+  scan.warningState[key] = {
+    metric_type: spec.metricType,
+    hcType: spec.hcType,
+    error_class: errorClass,
+  };
+}
+
+function noteEmitted(scan, spec) {
+  if (!scan.emittedTypes) scan.emittedTypes = new Set();
+  scan.emittedTypes.add(spec.hcType || spec.metricType);
 }
 
 function parseBloodPressure(record) {
@@ -441,7 +495,10 @@ export function emptyScan(from, to, metrics) {
       byMetric[spec.metricType] = { dates: [] };
     }
   }
-  return { from, to, byMetric, rows: [], workoutsWritten: 0 };
+  return {
+    from, to, byMetric, rows: [], workoutsWritten: 0,
+    warnings: [], warningState: {}, emittedTypes: new Set(),
+  };
 }
 
 function addScanDate(scan, metricType, date) {
@@ -459,12 +516,16 @@ export function summarizeScan(scan) {
       latest: dates[dates.length - 1] || null,
     };
   }
+  const warnings = Object.values(scan.warningState || {})
+    .filter(w => !(scan.emittedTypes && scan.emittedTypes.has(w.hcType) && w.error_class === 'no_records'))
+    .sort((a, b) => String(a.hcType).localeCompare(String(b.hcType)));
   return {
     from: scan.from,
     to: scan.to,
     metrics,
     row_count: scan.rows.length,
     workouts_written: scan.workoutsWritten,
+    warnings,
   };
 }
 
@@ -482,6 +543,42 @@ async function readAggregates(hc, spec, dateStr) {
   return applyNumericPolicy(num(raw), spec);
 }
 
+async function readHeartRateRecords(hc, startIso, endIso) {
+  const types = [pluginReadRecordType('HeartRate'), 'HeartRate'];
+  const seen = new Set();
+  for (const type of types) {
+    if (seen.has(type)) continue;
+    seen.add(type);
+    try {
+      const { records } = await hc.readRecords({ start: startIso, end: endIso, type });
+      return Array.isArray(records) ? records : [];
+    } catch (e) {
+      if (/Unexpected RecordType/i.test(String(e?.message || ''))) continue;
+      throw e;
+    }
+  }
+  return [];
+}
+
+async function readHeartRateDay(hc, spec, dateStr) {
+  const { startIso, endIso } = localDayBounds(dateStr);
+  const { aggregates } = await hc.aggregateRecords({
+    start: startIso,
+    end: endIso,
+    type: 'HeartRate',
+    groupBy: 'day',
+  });
+  let value = heartRateFromAggregates(aggregates);
+  if (value == null) {
+    const records = await readHeartRateRecords(hc, startIso, endIso);
+    value = heartRateFromRecords(records);
+    if (value == null) {
+      return { value: null, empty: !records.length };
+    }
+  }
+  return { value, empty: false };
+}
+
 async function readPoint(hc, spec, dateStr) {
   const { startIso, endIso } = localDayBounds(dateStr);
   const { records } = await hc.readRecords({
@@ -489,11 +586,12 @@ async function readPoint(hc, spec, dateStr) {
     end: endIso,
     type: spec.hcType,
   });
-  const latest = pickLatestRecord(records || []);
-  if (!latest) return null;
+  const list = records || [];
+  const latest = pickLatestRecord(list);
+  if (!latest) return { rows: null, empty: true, parseError: false };
   if (spec.parser === 'bloodPressure') {
     const bp = parseRecordValue(latest, 'bloodPressure');
-    if (!bp) return null;
+    if (!bp) return { rows: null, empty: false, parseError: true };
     const rows = [];
     if (bp.systolic != null) {
       rows.push({ metricType: 'blood_pressure_systolic', value: bp.systolic, metadata: provenanceMetadata(latest, spec.hcType) });
@@ -501,12 +599,17 @@ async function readPoint(hc, spec, dateStr) {
     if (bp.diastolic != null) {
       rows.push({ metricType: 'blood_pressure_diastolic', value: bp.diastolic, metadata: provenanceMetadata(latest, spec.hcType) });
     }
-    return rows;
+    if (!rows.length) return { rows: null, empty: false, parseError: true };
+    return { rows, empty: false, parseError: false };
   }
   const parsed = parseRecordValue(latest, spec.parser);
   const value = applyNumericPolicy(parsed, spec);
-  if (value == null) return null;
-  return [{ metricType: spec.metricType, value, metadata: provenanceMetadata(latest, spec.hcType) }];
+  if (value == null) return { rows: null, empty: false, parseError: true };
+  return {
+    rows: [{ metricType: spec.metricType, value, metadata: provenanceMetadata(latest, spec.hcType) }],
+    empty: false,
+    parseError: false,
+  };
 }
 
 async function readSleep(hc, dateStr, timeZone) {
@@ -526,6 +629,27 @@ async function readSleep(hc, dateStr, timeZone) {
   return Object.entries(extracted.metrics)
     .filter(([, value]) => value != null)
     .map(([metricType, value]) => ({ metricType, value, metadata: meta }));
+}
+
+export function applyDerivedBodyRows(scan) {
+  const byDate = {};
+  for (const row of scan.rows) {
+    if (!byDate[row.date]) byDate[row.date] = {};
+    byDate[row.date][row.metric_type] = row.value;
+  }
+  for (const [date, metrics] of Object.entries(byDate)) {
+    const { metrics: next, metadata } = applyHealthConnectBodyDerivations(metrics);
+    if (next.body_water_pct != null && metrics.body_water_pct == null) {
+      addScanDate(scan, 'body_water_pct', date);
+      scan.rows.push({
+        date,
+        source: SOURCE,
+        metric_type: 'body_water_pct',
+        value: next.body_water_pct,
+        metadata: { ...(metadata.body_water_pct || {}), record_type: 'BodyWaterMass' },
+      });
+    }
+  }
 }
 
 export async function scanRange({
@@ -563,27 +687,59 @@ export async function scanRange({
         if (spec.kind === 'aggregate') {
           const value = await readAggregates(hc, spec, dateStr);
           if (value == null) continue;
+          noteEmitted(scan, spec);
           addScanDate(scan, spec.metricType, dateStr);
           scan.rows.push({ date: dateStr, source: SOURCE, metric_type: spec.metricType, value, metadata: { record_type: spec.hcType } });
+        } else if (spec.kind === 'heart') {
+          const hr = await readHeartRateDay(hc, spec, dateStr);
+          if (hr.value == null) {
+            noteWarning(scan, spec, hr.empty ? 'no_records' : 'parse_error');
+            continue;
+          }
+          noteEmitted(scan, spec);
+          addScanDate(scan, spec.metricType, dateStr);
+          scan.rows.push({
+            date: dateStr,
+            source: SOURCE,
+            metric_type: spec.metricType,
+            value: hr.value,
+            metadata: { record_type: spec.hcType },
+          });
         } else if (spec.kind === 'records') {
-          const rows = await readPoint(hc, spec, dateStr);
-          if (!rows) continue;
-          for (const row of rows) {
+          const result = await readPoint(hc, spec, dateStr);
+          if (result.empty) {
+            noteWarning(scan, spec, 'no_records');
+            continue;
+          }
+          if (result.parseError || !result.rows) {
+            noteWarning(scan, spec, 'parse_error');
+            continue;
+          }
+          noteEmitted(scan, spec);
+          for (const row of result.rows) {
             addScanDate(scan, row.metricType, dateStr);
             scan.rows.push({ date: dateStr, source: SOURCE, metric_type: row.metricType, value: row.value, metadata: row.metadata });
           }
         } else if (spec.kind === 'sleep') {
           const rows = await readSleep(hc, dateStr, timeZone);
+          if (!rows.length) {
+            noteWarning(scan, spec, 'no_records');
+            continue;
+          }
+          noteEmitted(scan, spec);
           for (const row of rows) {
             addScanDate(scan, row.metricType, dateStr);
             scan.rows.push({ date: dateStr, source: SOURCE, metric_type: row.metricType, value: row.value, metadata: row.metadata });
           }
         }
-      } catch {
-        // Missing permission/type for one metric is absence, not a fake zero.
+      } catch (err) {
+        noteWarning(scan, spec, classifyScanError(err));
       }
     }
   }
+  applyDerivedBodyRows(scan);
+  scan.warnings = Object.values(scan.warningState || {})
+    .filter(w => !(scan.emittedTypes && scan.emittedTypes.has(w.hcType) && w.error_class === 'no_records'));
   return scan;
 }
 
