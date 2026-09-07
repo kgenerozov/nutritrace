@@ -41,9 +41,14 @@ import {
   sanitizeHealthConnectError,
 } from './health-connect-heart-rate.js';
 import {
+  BODY_COMPOSITION_DIAGNOSTIC_TYPES,
   BODY_WATER_MASS_RECORD,
   applyHealthConnectBodyDerivations,
+  classifyBodyCompositionParse,
+  parseBasalMetabolicRateKcalDay,
   parseMassKg,
+  parsePercentage,
+  parserForBodyKind,
 } from './health-connect-body-composition.js';
 
 export { DESIRED_READ_RECORD_TYPES };
@@ -51,6 +56,23 @@ export { DESIRED_READ_RECORD_TYPES };
 function _getPlugin() {
   if (!isNative) return null;
   return HealthConnect;
+}
+
+function _logBodyComposition(type, { permission, records, parse, emitted, error }) {
+  const parts = [
+    `[health-connect] ${type}:`,
+    `permission=${permission}`,
+    `records=${records}`,
+    `parse=${parse}`,
+    `emitted=${emitted}`,
+  ];
+  if (error) parts.push(`error=${error}`);
+  console.warn(parts.join(' '));
+}
+
+function _latestRecord(records) {
+  if (!Array.isArray(records) || records.length === 0) return null;
+  return records[records.length - 1];
 }
 
 async function _readHeartRateRecords(hc, start, end) {
@@ -183,6 +205,14 @@ export async function readTodayData() {
 
   const metrics = {};
 
+  let granted = new Set();
+  try {
+    granted = grantedReadSet(await getGrantedPermissions());
+  } catch (e) {
+    _dlog('[health-connect] granted permissions lookup failed:', sanitizeHealthConnectError(e));
+  }
+  const permissionStatus = (name) => (grantedCoversDesired(name, granted) ? 'granted' : 'missing');
+
   // Steps (aggregate for full day)
   try {
     const { aggregates } = await hc.aggregateRecords({
@@ -248,34 +278,30 @@ export async function readTodayData() {
     console.warn('[health-connect] RestingHeartRate error:', sanitizeHealthConnectError(e));
   }
 
-  // Weight
+  // Weight — plugin WeightRecord is custom JSON; string path is AndroidX toString.
   try {
     const { records } = await hc.readRecords({
       start: todayStart, end: todayEnd,
       type: 'Weight',
     });
-    _dlog(`[health-connect] Weight: ${records.length} records`);
-    if (records.length > 0) {
-      const latest = records[records.length - 1];
-      _dlog(`[health-connect] Weight record type: ${typeof latest}`);
-      _dlog(`[health-connect] Weight record FULL:`, JSON.stringify(latest).slice(0, 500));
-      _dlog(`[health-connect] Weight record keys:`, typeof latest === 'object' ? Object.keys(latest) : 'N/A');
-      let wkg = 0;
-      if (typeof latest === 'string') {
-        // Plugin may return Kotlin toString() — parse mass value from it
-        const match = latest.match(/value=([\d.]+)/);
-        if (match) wkg = parseFloat(match[1]);
-        _dlog(`[health-connect] Weight parsed from string: ${wkg}`);
-      } else {
-        // Try every possible property path the plugin might use
-        wkg = latest.weight?.inKilograms ?? latest.mass?.inKilograms ?? latest.value ?? 0;
-        if (typeof wkg === 'object') wkg = wkg.inKilograms ?? wkg.value ?? 0;
-        _dlog(`[health-connect] Weight from object: ${wkg} (weight=${JSON.stringify(latest.weight)}, mass=${JSON.stringify(latest.mass)}, value=${latest.value})`);
-      }
-      if (wkg > 0) metrics.weight_kg = +wkg.toFixed(1);
-      _dlog(`[health-connect] Final weight_kg: ${metrics.weight_kg}`);
-    }
-  } catch (e) { console.warn('[health-connect] Weight error:', e.message); }
+    const latest = _latestRecord(records);
+    const kg = parseMassKg(latest);
+    if (kg != null) metrics.weight_kg = +kg.toFixed(1);
+    _logBodyComposition('Weight', {
+      permission: permissionStatus('Weight'),
+      records: records?.length || 0,
+      parse: classifyBodyCompositionParse(latest, kg),
+      emitted: kg != null ? 'yes' : 'no',
+    });
+  } catch (e) {
+    _logBodyComposition('Weight', {
+      permission: permissionStatus('Weight'),
+      records: 0,
+      parse: 'parse_error',
+      emitted: 'no',
+      error: sanitizeHealthConnectError(e),
+    });
+  }
 
   // Sleep session (look back 24h for last night's sleep)
   try {
@@ -406,27 +432,30 @@ export async function readTodayData() {
     }
   } catch (e) { _dlog(`[health-connect] OxygenSaturation read failed: ${e?.message}`); }
 
-  // Body fat percentage
+  // Body fat percentage — plugin returns AndroidX BodyFatRecord.toString().
   try {
     const { records } = await hc.readRecords({
       start: todayStart, end: todayEnd,
       type: 'BodyFat',
     });
-    if (records.length > 0) {
-      const latest = records[records.length - 1];
-      _dlog('[health-connect] BodyFat record:', JSON.stringify(latest).slice(0, 300));
-      let pct = 0;
-      if (typeof latest === 'string') {
-        // Plugin returns raw Kotlin toString() — parse percentage from it
-        const match = latest.match(/percentage=([\d.]+)%/);
-        if (match) pct = parseFloat(match[1]);
-      } else {
-        pct = latest.percentage?.value ?? latest.percentage ?? latest.value ?? 0;
-        if (typeof pct === 'object') pct = 0;
-      }
-      if (pct > 0) metrics.body_fat_pct = +pct.toFixed(1);
-    }
-  } catch (e) { console.warn('[health-connect] BodyFat error:', e.message); }
+    const latest = _latestRecord(records);
+    const pct = parsePercentage(latest);
+    if (pct != null) metrics.body_fat_pct = +pct.toFixed(1);
+    _logBodyComposition('BodyFat', {
+      permission: permissionStatus('BodyFat'),
+      records: records?.length || 0,
+      parse: classifyBodyCompositionParse(latest, pct),
+      emitted: pct != null ? 'yes' : 'no',
+    });
+  } catch (e) {
+    _logBodyComposition('BodyFat', {
+      permission: permissionStatus('BodyFat'),
+      records: 0,
+      parse: 'parse_error',
+      emitted: 'no',
+      error: sanitizeHealthConnectError(e),
+    });
+  }
 
   // Respiratory rate
   try {
@@ -458,23 +487,49 @@ export async function readTodayData() {
     if (aggregates.length > 0) metrics.water_ml = Math.round(aggregates[0].value * 1000); // liters to ml
   } catch (e) { _dlog(`[health-connect] Hydration read failed: ${e?.message}`); }
 
-  // Bone mass
+  // Bone mass — plugin returns AndroidX BoneMassRecord.toString().
   try {
     const { records } = await hc.readRecords({ start: todayStart, end: todayEnd, type: 'BoneMass' });
-    if (records.length > 0) {
-      const latest = records[records.length - 1];
-      metrics.bone_mass_kg = +(latest.mass?.inKilograms || latest.value || 0).toFixed(2);
-    }
-  } catch (e) { _dlog(`[health-connect] BoneMass read failed: ${e?.message}`); }
+    const latest = _latestRecord(records);
+    const kg = parseMassKg(latest);
+    if (kg != null) metrics.bone_mass_kg = +kg.toFixed(2);
+    _logBodyComposition('BoneMass', {
+      permission: permissionStatus('BoneMass'),
+      records: records?.length || 0,
+      parse: classifyBodyCompositionParse(latest, kg),
+      emitted: kg != null ? 'yes' : 'no',
+    });
+  } catch (e) {
+    _logBodyComposition('BoneMass', {
+      permission: permissionStatus('BoneMass'),
+      records: 0,
+      parse: 'parse_error',
+      emitted: 'no',
+      error: sanitizeHealthConnectError(e),
+    });
+  }
 
-  // Lean body mass
+  // Lean body mass — plugin returns AndroidX LeanBodyMassRecord.toString().
   try {
     const { records } = await hc.readRecords({ start: todayStart, end: todayEnd, type: 'LeanBodyMass' });
-    if (records.length > 0) {
-      const latest = records[records.length - 1];
-      metrics.lean_mass_kg = +(latest.mass?.inKilograms || latest.value || 0).toFixed(1);
-    }
-  } catch (e) { _dlog(`[health-connect] LeanBodyMass read failed: ${e?.message}`); }
+    const latest = _latestRecord(records);
+    const kg = parseMassKg(latest);
+    if (kg != null) metrics.lean_mass_kg = +kg.toFixed(1);
+    _logBodyComposition('LeanBodyMass', {
+      permission: permissionStatus('LeanBodyMass'),
+      records: records?.length || 0,
+      parse: classifyBodyCompositionParse(latest, kg),
+      emitted: kg != null ? 'yes' : 'no',
+    });
+  } catch (e) {
+    _logBodyComposition('LeanBodyMass', {
+      permission: permissionStatus('LeanBodyMass'),
+      records: 0,
+      parse: 'parse_error',
+      emitted: 'no',
+      error: sanitizeHealthConnectError(e),
+    });
+  }
 
   // Body water mass — composition water, NOT HydrationRecord (drunk fluid).
   try {
@@ -482,11 +537,25 @@ export async function readTodayData() {
       start: todayStart, end: todayEnd,
       type: BODY_WATER_MASS_RECORD,
     });
-    if (records.length > 0) {
-      const kg = parseMassKg(records[records.length - 1]);
-      if (kg != null) metrics.body_water_kg = +kg.toFixed(2);
-    }
-  } catch (e) { _dlog(`[health-connect] BodyWaterMass read failed: ${e?.message}`); }
+    const latest = _latestRecord(records);
+    const kg = parseMassKg(latest);
+    if (kg != null) metrics.body_water_kg = +kg.toFixed(2);
+    _logBodyComposition('BodyWaterMass', {
+      permission: permissionStatus('BodyWaterMass'),
+      records: records?.length || 0,
+      parse: classifyBodyCompositionParse(latest, kg),
+      emitted: kg != null ? 'yes' : 'no',
+      body_water_pct: 'pending_derivation',
+    });
+  } catch (e) {
+    _logBodyComposition('BodyWaterMass', {
+      permission: permissionStatus('BodyWaterMass'),
+      records: 0,
+      parse: 'parse_error',
+      emitted: 'no',
+      error: sanitizeHealthConnectError(e),
+    });
+  }
 
   // Body temperature
   try {
@@ -497,14 +566,28 @@ export async function readTodayData() {
     }
   } catch (e) { _dlog(`[health-connect] BodyTemperature read failed: ${e?.message}`); }
 
-  // Basal metabolic rate
+  // Basal metabolic rate — plugin returns AndroidX BasalMetabolicRateRecord.toString().
+  // Health Connect stores Power; NutriTrace metric is kcal/day.
   try {
     const { records } = await hc.readRecords({ start: todayStart, end: todayEnd, type: 'BasalMetabolicRate' });
-    if (records.length > 0) {
-      const latest = records[records.length - 1];
-      metrics.basal_metabolic_rate = Math.round(latest.basalMetabolicRate?.inKilocaloriesPerDay || latest.value || 0);
-    }
-  } catch (e) { _dlog(`[health-connect] BasalMetabolicRate read failed: ${e?.message}`); }
+    const latest = _latestRecord(records);
+    const kcalDay = parseBasalMetabolicRateKcalDay(latest);
+    if (kcalDay != null) metrics.basal_metabolic_rate = Math.round(kcalDay);
+    _logBodyComposition('BasalMetabolicRate', {
+      permission: permissionStatus('BasalMetabolicRate'),
+      records: records?.length || 0,
+      parse: classifyBodyCompositionParse(latest, kcalDay),
+      emitted: kcalDay != null ? 'yes' : 'no',
+    });
+  } catch (e) {
+    _logBodyComposition('BasalMetabolicRate', {
+      permission: permissionStatus('BasalMetabolicRate'),
+      records: 0,
+      parse: 'parse_error',
+      emitted: 'no',
+      error: sanitizeHealthConnectError(e),
+    });
+  }
 
   // VO2 Max
   try {
@@ -516,6 +599,9 @@ export async function readTodayData() {
   } catch (e) { _dlog(`[health-connect] Vo2Max read failed: ${e?.message}`); }
 
   const derived = applyHealthConnectBodyDerivations(metrics);
+  console.warn(
+    `[health-connect] BodyComposition derived: body_water_kg=${derived.metrics.body_water_kg != null ? 'present' : 'absent'} body_water_pct=${derived.metrics.body_water_pct != null ? 'present' : 'absent'} fat_mass_kg=${derived.metrics.fat_mass_kg != null ? 'present' : 'absent'}`,
+  );
   Object.defineProperty(derived.metrics, '__metadata', {
     value: derived.metadata,
     enumerable: false,
@@ -832,6 +918,105 @@ export async function checkHeartRateStatus(options = {}) {
     status.restingHrLocal = localMetricPresence(grouped, dateStr, 'resting_hr');
   } catch (e) {
     _dlog('[health-connect] HeartRate local wellness lookup failed:', sanitizeHealthConnectError(e));
+  }
+
+  return status;
+}
+
+/**
+ * On-device body-composition status for Settings → Diagnostics.
+ * Permission / record count / parse / local presence only — never metric values.
+ */
+export async function checkBodyCompositionStatus(options = {}) {
+  const dateStr = options.dateStr || (() => {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    const d = String(now.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  })();
+
+  const types = {};
+  for (const spec of BODY_COMPOSITION_DIAGNOSTIC_TYPES) {
+    types[spec.desired] = {
+      permission: 'missing',
+      records: 0,
+      parse: 'no_records',
+      local: 'absent',
+    };
+  }
+
+  const status = {
+    availability: 'NotSupported',
+    types,
+    derived: {
+      fat_mass_kg: 'absent',
+      body_water_pct: 'absent',
+    },
+    error: null,
+  };
+
+  try {
+    status.availability = await checkAvailability();
+  } catch (e) {
+    status.error = sanitizeHealthConnectError(e);
+    return status;
+  }
+
+  const hc = _getPlugin();
+  if (!hc || status.availability !== 'Available') {
+    return status;
+  }
+
+  let granted = new Set();
+  try {
+    granted = grantedReadSet(await getGrantedPermissions());
+  } catch (e) {
+    status.error = sanitizeHealthConnectError(e);
+    return status;
+  }
+
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+  const todayEnd = now.toISOString();
+
+  for (const spec of BODY_COMPOSITION_DIAGNOSTIC_TYPES) {
+    const row = status.types[spec.desired];
+    row.permission = grantedCoversDesired(spec.desired, granted) ? 'granted' : 'missing';
+    if (row.permission !== 'granted') {
+      row.parse = 'no_records';
+      continue;
+    }
+    try {
+      const typeName = spec.desired === 'BodyWaterMass'
+        ? BODY_WATER_MASS_RECORD
+        : spec.desired;
+      const { records } = await hc.readRecords({
+        start: todayStart,
+        end: todayEnd,
+        type: typeName,
+      });
+      const list = Array.isArray(records) ? records : [];
+      row.records = list.length;
+      const latest = _latestRecord(list);
+      const parsed = parserForBodyKind(spec.kind)(latest);
+      row.parse = classifyBodyCompositionParse(latest, parsed);
+    } catch (e) {
+      row.parse = 'parse_error';
+      row.error = sanitizeHealthConnectError(e);
+    }
+  }
+
+  try {
+    const { dbGetWellnessByDate } = await import('./db-native.js');
+    const grouped = await dbGetWellnessByDate(dateStr, 'health_connect');
+    for (const spec of BODY_COMPOSITION_DIAGNOSTIC_TYPES) {
+      status.types[spec.desired].local = localMetricPresence(grouped, dateStr, spec.metric);
+    }
+    status.derived.fat_mass_kg = localMetricPresence(grouped, dateStr, 'fat_mass_kg');
+    status.derived.body_water_pct = localMetricPresence(grouped, dateStr, 'body_water_pct');
+  } catch (e) {
+    _dlog('[health-connect] Body composition local wellness lookup failed:', sanitizeHealthConnectError(e));
   }
 
   return status;

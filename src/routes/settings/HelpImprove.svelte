@@ -120,6 +120,8 @@
   let _hrCheck = null;
   let _hrCheckBusy = false;
   let _hrPermBusy = false;
+  let _bodyCheck = null;
+  let _bodyCheckBusy = false;
 
   async function _runHeartRateCheck() {
     _hrCheckBusy = true;
@@ -141,12 +143,45 @@
     _hrCheckBusy = false;
   }
 
+  function _formatBodyCheck(check) {
+    if (!check) return '';
+    const order = ['Weight', 'BodyFat', 'LeanBodyMass', 'BoneMass', 'BodyWaterMass', 'BasalMetabolicRate'];
+    const lines = [`Health Connect: ${check.availability}`];
+    for (const name of order) {
+      const row = check.types?.[name] || {};
+      lines.push(
+        `${name}: permission=${row.permission ?? 'missing'} records=${row.records ?? 0} parse=${row.parse ?? 'no_records'} local=${row.local ?? 'absent'}`,
+      );
+    }
+    lines.push(`fat_mass_kg local: ${check.derived?.fat_mass_kg ?? 'absent'}`);
+    lines.push(`body_water_pct local: ${check.derived?.body_water_pct ?? 'absent'}`);
+    if (check.error) lines.push(`error: ${check.error}`);
+    return lines.join('\n');
+  }
+
+  async function _runBodyCompositionCheck() {
+    _bodyCheckBusy = true;
+    try {
+      const { checkBodyCompositionStatus } = await import('../../lib/health-connect.js');
+      _bodyCheck = await checkBodyCompositionStatus();
+    } catch (e) {
+      _bodyCheck = {
+        availability: 'error',
+        types: {},
+        derived: { fat_mass_kg: 'absent', body_water_pct: 'absent' },
+        error: e?.message || 'check failed',
+      };
+    }
+    _bodyCheckBusy = false;
+  }
+
   async function _requestHcPermissions() {
     _hrPermBusy = true;
     try {
       const { requestPermissions } = await import('../../lib/health-connect.js');
       await requestPermissions();
       await _runHeartRateCheck();
+      await _runBodyCompositionCheck();
     } catch (e) {
       showError('Health Connect permission request failed');
     }
@@ -295,6 +330,22 @@ avg_heart_rate local row: {_hrCheck.avgHeartRateLocal}
 resting_hr local row: {_hrCheck.restingHrLocal}{#if _hrCheck.error}
 
 error: {_hrCheck.error}{/if}</pre>
+            {/if}
+      </div>
+      <div class="setting-divider"></div>
+      <div class="setting-row" style="flex-direction:column;align-items:flex-start;gap:8px">
+        <span class="setting-label">Health Connect Body Composition Check</span>
+        <p class="setting-desc" style="line-height:1.5">
+          Status only (no body measurements). Distinguishes missing permission, record presence, parse success, and whether a local wellness row exists after sync. Muscle mass and visceral fields are not standard Health Connect types and may stay blank.
+        </p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-secondary" style="height:40px;font-size:13px" disabled={_bodyCheckBusy} on:click={_runBodyCompositionCheck}>
+            <span class="material-symbols-rounded" style="font-size:16px">monitor_weight</span>
+            {_bodyCheckBusy ? 'Checking…' : 'Run Body Composition check'}
+          </button>
+        </div>
+        {#if _bodyCheck}
+          <pre class="setting-desc" style="line-height:1.5;white-space:pre-wrap;font-family:monospace;font-size:12px;margin:0">{_formatBodyCheck(_bodyCheck)}</pre>
         {/if}
       </div>
     {/if}

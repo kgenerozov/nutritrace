@@ -7,6 +7,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Health Connect body-composition records stored as 0.** Pinned
+  `@devmaxime/capacitor-health-connect` 1.1.0 custom-converts `WeightRecord`
+  and returns other body types as AndroidX `toString()`. NutriTrace treated
+  LeanBodyMass / BoneMass / BMR as JS objects and fell back to `0`, violating
+  missing ≠ zero. Shared parsers now understand connect-client 1.1.0
+  `Mass` / `Percentage` / `Power` strings, convert BMR Watts → kcal/day, and
+  omit the metric on parse failure. Diagnostics → Body Composition Check
+  reports permission / record count / parse / local presence only.
+
 ---
 
 ## [1.2.0] - 2026-08-23
