@@ -62,6 +62,17 @@ export function classifyHeartRateRead({ permissionGranted, error, aggregates, re
   return 'no_records';
 }
 
+/**
+ * Which Health Connect path produced (or was attempted for) HeartRate.
+ * Aggregate is primary; HeartRateSeries records are fallback only.
+ * Does not include BPM values.
+ */
+export function classifyHeartRateSource({ aggregates, usedRecordsFallback } = {}) {
+  if (usedRecordsFallback) return 'records';
+  if (heartRateFromAggregates(aggregates) != null) return 'aggregate';
+  return 'aggregate';
+}
+
 export function localMetricPresence(groupedByDate, dateStr, metricType) {
   const day = groupedByDate?.[dateStr] || groupedByDate?.[Object.keys(groupedByDate || {})[0]] || {};
   const value = day?.[metricType];

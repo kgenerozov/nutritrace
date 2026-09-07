@@ -132,6 +132,7 @@
         heartRatePermission: 'missing',
         restingHeartRatePermission: 'missing',
         heartRateRead: 'read_error',
+        heartRateSource: 'n/a',
         avgHeartRateLocal: 'absent',
         restingHrLocal: 'absent',
         error: e?.message || 'check failed',
@@ -271,7 +272,7 @@
       <div class="setting-row" style="flex-direction:column;align-items:flex-start;gap:8px">
         <span class="setting-label">Health Connect Heart Rate Check</span>
         <p class="setting-desc" style="line-height:1.5">
-          Status only (no heart-rate values). Distinguishes missing permission, no records, a successful read, and whether a local wellness row exists after sync.
+          Status only (no heart-rate values). Distinguishes missing permission, aggregate vs records fallback, a successful read, and whether a local wellness row exists after sync.
         </p>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn btn-secondary" style="height:40px;font-size:13px" disabled={_hrCheckBusy} on:click={_runHeartRateCheck}>
@@ -288,7 +289,8 @@
 READ_HEART_RATE: {_hrCheck.heartRatePermission}
 READ_RESTING_HEART_RATE: {_hrCheck.restingHeartRatePermission}
 HeartRate read: {_hrCheck.heartRateRead}
-HeartRate records: {_hrCheck.heartRateRecords ?? 'n/a'}
+HeartRate source: {_hrCheck.heartRateSource ?? 'n/a'}
+HeartRate fallback records: {_hrCheck.heartRateRecords ?? 'n/a'}
 avg_heart_rate local row: {_hrCheck.avgHeartRateLocal}
 resting_hr local row: {_hrCheck.restingHrLocal}{#if _hrCheck.error}
 

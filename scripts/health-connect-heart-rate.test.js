@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import {
   classifyHeartRateRead,
+  classifyHeartRateSource,
   heartRateFromAggregates,
   heartRateFromRecords,
   localMetricPresence,
@@ -231,4 +232,18 @@ test('HeartRate records can supply avg when aggregate is the plugin zero default
     aggregates: [{ value: 0, min: 0, max: 0 }],
     records: ['HeartRateRecord(samples=[Sample(beatsPerMinute=70)])'],
   }), 'available');
+});
+
+test('HeartRate source is aggregate when the primary path has a usable bucket', () => {
+  assert.equal(classifyHeartRateSource({
+    aggregates: [{ value: 1, min: 1, max: 1 }],
+    usedRecordsFallback: false,
+  }), 'aggregate');
+});
+
+test('HeartRate source is records only when aggregate fallback was used', () => {
+  assert.equal(classifyHeartRateSource({
+    aggregates: [{ value: 0, min: 0, max: 0 }],
+    usedRecordsFallback: true,
+  }), 'records');
 });

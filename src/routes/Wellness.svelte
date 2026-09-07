@@ -7,6 +7,7 @@
     fitbitSyncMode, withingsSyncMode, garminSyncMode, healthConnectSyncMode, timeFormat } from '../stores/settings.js';
   import { showSuccess, showError } from '../stores/toast.js';
   import { localDateStr } from '../lib/db.js';
+  import { AVG_HEART_RATE_METRIC, formatAvgHeartRate } from '../lib/wellness-heart-metrics.js';
   import { NtApi } from '../lib/api.js';
   import { isNative, getServerUrl } from '../lib/platform.js';
   import { portal } from '../lib/portal.js';
@@ -55,6 +56,7 @@
     { id: 'sleep_full_awakenings',         label: 'Full Awakenings',      unit: '',    group: 'sleep_quality', icon: 'notifications_active', fmt: v => Math.round(v), sources: ['fitbit'], desc: 'Number of distinct wake events of 5 minutes or longer. Shown alongside Interruptions on the same card.', hideTile: true },
     // Heart — both
     { id: 'resting_hr',        label: 'Resting Heart Rate', unit: 'bpm',  group: 'heart', icon: 'favorite',       fmt: v => Math.round(v), sources: ['fitbit','garmin'], desc: 'Heart rate when fully at rest. Lower is generally better — a downward trend over time reflects improving cardiovascular fitness.' },
+    { ...AVG_HEART_RATE_METRIC, fmt: v => Math.round(v) },
     { id: 'spo2_avg',          label: 'SpO2',               unit: '%',    group: 'heart', icon: 'water_drop',     fmt: v => v.toFixed(1),  sources: ['fitbit','garmin'], desc: 'Blood oxygen saturation measured overnight. Healthy range is typically 95–100%. Dips below 90% may indicate sleep apnea.' },
     { id: 'respiratory_rate',  label: 'Respiratory Rate',   unit: 'brpm', group: 'heart', icon: 'air',            fmt: v => v.toFixed(1),  sources: ['fitbit','garmin'], desc: 'Average breaths per minute during sleep. Normal adult range is 12–20 breaths/min. Elevated values may signal illness or stress.' },
     { id: 'hrv_daily_rmssd',   label: 'HRV (RMSSD)',        unit: 'ms',   group: 'heart', icon: 'monitor_heart',  fmt: v => v.toFixed(1),  sources: ['fitbit','garmin'], desc: 'Heart rate variability — the variation between heartbeats. Higher values indicate better recovery and autonomic nervous system balance.' },
@@ -96,6 +98,7 @@
     active_minutes:     'wl_active',
     sleep_duration_min: 'wl_sleep',
     resting_hr:         'wl_rhr',
+    avg_heart_rate:     'wl_avg_hr',
     hrv_daily_rmssd:    'wl_hrv',
     spo2_avg:           'wl_spo2',
   };
@@ -112,7 +115,7 @@
       'vascular_age','metabolic_age','basal_metabolic_rate','nerve_health_score','eda_feet','pulse_wave_velocity','ecg_heart_rate','ecg_afib',
       'body_battery_high','body_battery_low','stress_avg',
       'segmental_analysis',
-      'active_calories','avg_heart_rate','blood_pressure_systolic','blood_pressure_diastolic','body_temperature','sleep_awake_min','water_ml',
+      'active_calories','blood_pressure_systolic','blood_pressure_diastolic','body_temperature','sleep_awake_min','water_ml',
     ];
     const cur = $wellnessMetrics ?? all;
     if (cur.includes(id)) {
@@ -235,6 +238,7 @@
   const SLEEP_TIME_IDS = new Set(['sleep_duration_min','sleep_deep_min','sleep_light_min','sleep_rem_min','sleep_wake_min']);
 
   function fmtMetric(m, rawValue) {
+    if (m.id === 'avg_heart_rate') return formatAvgHeartRate(rawValue);
     if (rawValue == null) return null;
     if (m.id === 'distance_km') {
       const d = fmtDistance(rawValue);

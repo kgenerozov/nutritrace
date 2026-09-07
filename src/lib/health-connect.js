@@ -34,6 +34,7 @@ import {
 } from './health-connect-permissions.js';
 import {
   classifyHeartRateRead,
+  classifyHeartRateSource,
   heartRateFromAggregates,
   heartRateFromRecords,
   localMetricPresence,
@@ -72,9 +73,11 @@ async function _readHeartRate(hc, start, end) {
   const bucketCount = Array.isArray(aggregates) ? aggregates.length : 0;
   let value = heartRateFromAggregates(aggregates);
   let records = [];
+  let usedRecordsFallback = false;
   if (value == null) {
     records = await _readHeartRateRecords(hc, start, end);
     value = heartRateFromRecords(records);
+    usedRecordsFallback = true;
   }
   return {
     value,
@@ -82,6 +85,7 @@ async function _readHeartRate(hc, start, end) {
     recordCount: records.length,
     aggregates: aggregates || [],
     records,
+    source: classifyHeartRateSource({ aggregates, usedRecordsFallback }),
   };
 }
 
@@ -742,6 +746,7 @@ export async function checkHeartRateStatus(options = {}) {
     heartRatePermission: 'missing',
     restingHeartRatePermission: 'missing',
     heartRateRead: 'permission_denied',
+    heartRateSource: 'n/a',
     avgHeartRateLocal: 'absent',
     restingHrLocal: 'absent',
     error: null,
@@ -784,6 +789,7 @@ export async function checkHeartRateStatus(options = {}) {
       aggregates = hr.aggregates;
       records = hr.records;
       status.heartRateRecords = hr.recordCount;
+      status.heartRateSource = hr.source;
     } catch (e) {
       readError = e;
       status.error = sanitizeHealthConnectError(e);

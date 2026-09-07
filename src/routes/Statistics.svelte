@@ -105,6 +105,7 @@
       ...(_wlVisible('active_minutes')    ? [{ value: 'wl_active', label: 'Active Min.',   unit: 'min',   apiSource: 'fitgarm', apiField: 'active_minutes' }] : []),
       ...(_wlVisible('sleep_duration_min')? [{ value: 'wl_sleep',  label: 'Sleep',         unit: 'hr',    apiSource: 'fitgarm', apiField: 'sleep_duration_min', fmtVal: v => Math.round(v / 6) / 10 }] : []),
       ...(_wlVisible('resting_hr')        ? [{ value: 'wl_rhr',    label: 'Resting HR',    unit: 'bpm',   apiSource: 'fitgarm', apiField: 'resting_hr' }] : []),
+      ...(_wlVisible('avg_heart_rate')    ? [{ value: 'wl_avg_hr', label: 'Avg Heart Rate', unit: 'bpm',  apiSource: 'fitgarm', apiField: 'avg_heart_rate' }] : []),
       ...(_wlVisible('hrv_daily_rmssd')   ? [{ value: 'wl_hrv',    label: 'HRV',           unit: 'ms',    apiSource: 'fitgarm', apiField: 'hrv_daily_rmssd' }] : []),
       ...(_wlVisible('spo2_avg')          ? [{ value: 'wl_spo2',   label: 'SpO2',          unit: '%',     apiSource: 'fitgarm', apiField: 'spo2_avg' }] : []),
     ] : []),
@@ -165,7 +166,7 @@
   const PHYSIOLOGICAL_METRICS = new Set([
     'weight', 'neck', 'waist', 'hips', 'chest', 'thighs', 'biceps', 'calves',
     'body_fat', 'body_water',
-    'wl_sleep', 'wl_rhr', 'wl_hrv', 'wl_spo2', 'wl_muscle',
+    'wl_sleep', 'wl_rhr', 'wl_avg_hr', 'wl_hrv', 'wl_spo2', 'wl_muscle',
   ]);
   function isPhysiologicalMetric(id) {
     return PHYSIOLOGICAL_METRICS.has(id);
