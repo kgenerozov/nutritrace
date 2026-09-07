@@ -8,6 +8,7 @@ import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.ActiveCaloriesBurnedRecord
 import androidx.health.connect.client.records.BodyFatRecord
+import androidx.health.connect.client.records.BodyWaterMassRecord
 import androidx.health.connect.client.records.DistanceRecord
 import androidx.health.connect.client.records.ExerciseSessionRecord
 import androidx.health.connect.client.records.FloorsClimbedRecord
@@ -99,6 +100,7 @@ class HealthConnectSyncWorker(
             val metrics = mutableMapOf<String, Number>()
 
             readMetrics(client, todayStart, now, tomorrowStart, metrics, granted)
+            val metadata = derivedBodyMetadata(metrics)
 
             // Exercise sessions → workouts. Reads if the ExerciseSession
             // permission was granted; each session gets per-session calories
@@ -159,7 +161,7 @@ class HealthConnectSyncWorker(
                 return Result.success()
             }
 
-            writeToDb(ctx, todayStr, metrics, workouts)
+            writeToDb(ctx, todayStr, metrics, workouts, metadata)
 
             // Push to server so users on browser / other devices see today's
             // fresh metrics without needing to open the Android app first
@@ -168,7 +170,7 @@ class HealthConnectSyncWorker(
             // succeeded, and the JS-side sync will catch up on next app open.
             val (serverUrl, authToken) = readServerCredentials(ctx)
             if (!serverUrl.isNullOrBlank() && !authToken.isNullOrBlank()) {
-                pushToServer(serverUrl, authToken, todayStr, metrics, workouts)
+                pushToServer(serverUrl, authToken, todayStr, metrics, workouts, metadata)
             } else {
                 Log.d(TAG, "no server credentials in sync_meta, skipping server push (local-mode install?)")
             }
@@ -323,13 +325,46 @@ class HealthConnectSyncWorker(
             }
         }
 
-        // Hydration (liters → ml)
+        // Hydration (liters → ml) — consumed fluid, not body composition water.
         if (granted.contains(HealthPermission.getReadPermission(HydrationRecord::class))) {
             tryRead {
                 val r = client.aggregate(AggregateRequest(setOf(HydrationRecord.VOLUME_TOTAL), cumTr))
                 r[HydrationRecord.VOLUME_TOTAL]?.let { out["water_ml"] = (it.inLiters * 1000).toInt() }
             }
         }
+
+        // Body water mass (composition), not HydrationRecord.
+        if (granted.contains(HealthPermission.getReadPermission(BodyWaterMassRecord::class))) {
+            tryRead {
+                val records = client.readRecords(ReadRecordsRequest(BodyWaterMassRecord::class, tr)).records
+                records.lastOrNull()?.let {
+                    val kg = it.mass.inKilograms
+                    if (kg > 0) out["body_water_kg"] = (kg * 100.0).toLong() / 100.0
+                }
+            }
+        }
+    }
+
+    private fun derivedBodyMetadata(metrics: MutableMap<String, Number>): Map<String, String> {
+        val metadata = mutableMapOf<String, String>()
+        val water = metrics["body_water_kg"]?.toDouble()
+        val weight = metrics["weight_kg"]?.toDouble()
+        if (water != null && water > 0) {
+            metadata["body_water_kg"] =
+                """{"derived":false,"health_connect_record":"BodyWaterMassRecord"}"""
+        }
+        if (water != null && water > 0 && weight != null && weight > 0) {
+            metrics["body_water_pct"] = (water / weight * 1000.0).toLong() / 10.0
+            metadata["body_water_pct"] =
+                """{"derived":true,"derivation":"body_water_kg / weight_kg * 100","sources":["BodyWaterMassRecord","WeightRecord"]}"""
+        }
+        val fatPct = metrics["body_fat_pct"]?.toDouble()
+        if (metrics["fat_mass_kg"] == null && weight != null && weight > 0 && fatPct != null && fatPct > 0) {
+            metrics["fat_mass_kg"] = Math.round(weight * fatPct) / 100.0
+            metadata["fat_mass_kg"] =
+                """{"derived":true,"derivation":"weight_kg * body_fat_pct / 100","sources":["WeightRecord","BodyFatRecord"]}"""
+        }
+        return metadata
     }
 
     private inline fun tryRead(block: () -> Unit) {
@@ -393,7 +428,8 @@ class HealthConnectSyncWorker(
         authToken: String,
         dateStr: String,
         metrics: Map<String, Number>,
-        workouts: List<WorkoutRow>
+        workouts: List<WorkoutRow>,
+        metadata: Map<String, String> = emptyMap(),
     ) {
         var conn: HttpURLConnection? = null
         try {
@@ -404,7 +440,7 @@ class HealthConnectSyncWorker(
                     put("source", SOURCE)
                     put("metric_type", type)
                     put("value", value.toDouble())
-                    put("metadata", JSONObject())
+                    put("metadata", JSONObject(metadata[type] ?: "{}"))
                 })
             }
             val workoutsArr = JSONArray()
@@ -476,7 +512,13 @@ class HealthConnectSyncWorker(
         val calories: Int?
     )
 
-    private fun writeToDb(ctx: Context, dateStr: String, metrics: Map<String, Number>, workouts: List<WorkoutRow>) {
+    private fun writeToDb(
+        ctx: Context,
+        dateStr: String,
+        metrics: Map<String, Number>,
+        workouts: List<WorkoutRow>,
+        metadata: Map<String, String> = emptyMap(),
+    ) {
         val dbFile = ctx.getDatabasePath(DB_FILENAME)
         if (!dbFile.exists()) {
             Log.d(TAG, "DB not found at ${dbFile.absolutePath}")
@@ -487,24 +529,25 @@ class HealthConnectSyncWorker(
             db = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READWRITE)
             db.beginTransaction()
             try {
-                for ((type, value) in metrics) {
-                    val cv = ContentValues().apply {
-                        put("user_id", LOCAL_USER_ID)
-                        put("date", dateStr)
-                        put("source", SOURCE)
-                        put("metric_type", type)
-                        put("value", value.toDouble())
-                        put("metadata", "{}")
-                    }
-                    // Match the JS upsert: ON CONFLICT(user_id, date, source, metric_type) DO UPDATE
-                    db.execSQL(
-                        """INSERT INTO wellness_data (user_id, date, source, metric_type, value, metadata)
+            for ((type, value) in metrics) {
+                val meta = metadata[type] ?: "{}"
+                val cv = ContentValues().apply {
+                    put("user_id", LOCAL_USER_ID)
+                    put("date", dateStr)
+                    put("source", SOURCE)
+                    put("metric_type", type)
+                    put("value", value.toDouble())
+                    put("metadata", meta)
+                }
+                // Match the JS upsert: ON CONFLICT(user_id, date, source, metric_type) DO UPDATE
+                db.execSQL(
+                    """INSERT INTO wellness_data (user_id, date, source, metric_type, value, metadata)
                            VALUES (?, ?, ?, ?, ?, ?)
                            ON CONFLICT(user_id, date, source, metric_type) DO UPDATE SET
                              value=excluded.value, metadata=excluded.metadata, synced_at=datetime('now')""",
-                        arrayOf(LOCAL_USER_ID, dateStr, SOURCE, type, value.toDouble(), "{}")
-                    )
-                }
+                    arrayOf(LOCAL_USER_ID, dateStr, SOURCE, type, value.toDouble(), meta)
+                )
+            }
                 // Workouts — one row per HC ExerciseSession. Keyed by
                 // (user_id, source, source_id); on conflict every field
                 // gets refreshed from the incoming row so a later HC edit

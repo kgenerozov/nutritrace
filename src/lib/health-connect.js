@@ -40,6 +40,11 @@ import {
   localMetricPresence,
   sanitizeHealthConnectError,
 } from './health-connect-heart-rate.js';
+import {
+  BODY_WATER_MASS_RECORD,
+  applyHealthConnectBodyDerivations,
+  parseMassKg,
+} from './health-connect-body-composition.js';
 
 export { DESIRED_READ_RECORD_TYPES };
 
@@ -471,6 +476,18 @@ export async function readTodayData() {
     }
   } catch (e) { _dlog(`[health-connect] LeanBodyMass read failed: ${e?.message}`); }
 
+  // Body water mass — composition water, NOT HydrationRecord (drunk fluid).
+  try {
+    const { records } = await hc.readRecords({
+      start: todayStart, end: todayEnd,
+      type: BODY_WATER_MASS_RECORD,
+    });
+    if (records.length > 0) {
+      const kg = parseMassKg(records[records.length - 1]);
+      if (kg != null) metrics.body_water_kg = +kg.toFixed(2);
+    }
+  } catch (e) { _dlog(`[health-connect] BodyWaterMass read failed: ${e?.message}`); }
+
   // Body temperature
   try {
     const { records } = await hc.readRecords({ start: todayStart, end: todayEnd, type: 'BodyTemperature' });
@@ -498,7 +515,12 @@ export async function readTodayData() {
     }
   } catch (e) { _dlog(`[health-connect] Vo2Max read failed: ${e?.message}`); }
 
-  return metrics;
+  const derived = applyHealthConnectBodyDerivations(metrics);
+  Object.defineProperty(derived.metrics, '__metadata', {
+    value: derived.metadata,
+    enumerable: false,
+  });
+  return derived.metrics;
 }
 
 /**
@@ -683,10 +705,11 @@ export async function readExerciseSessions(fromIso, toIso) {
 export async function syncHealthConnect(dateStr) {
   const metrics = await readTodayData();
   const { dbUpsertWellness, dbUpsertWorkoutLocal } = await import('./db-native.js');
+  const metadataByType = metrics.__metadata || {};
 
   for (const [type, value] of Object.entries(metrics)) {
     if (value != null) {
-      await dbUpsertWellness(dateStr, 'health_connect', type, value);
+      await dbUpsertWellness(dateStr, 'health_connect', type, value, metadataByType[type] || {});
     }
   }
 

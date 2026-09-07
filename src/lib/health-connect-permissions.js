@@ -28,6 +28,7 @@ export const DESIRED_READ_RECORD_TYPES = Object.freeze([
   'BodyTemperature',
   'BasalMetabolicRate',
   'Vo2Max',
+  'BodyWaterMass',
 ]);
 
 /**
