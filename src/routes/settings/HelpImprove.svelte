@@ -117,6 +117,41 @@
     setVerboseLogging(on);
   }
 
+  let _hrCheck = null;
+  let _hrCheckBusy = false;
+  let _hrPermBusy = false;
+
+  async function _runHeartRateCheck() {
+    _hrCheckBusy = true;
+    try {
+      const { checkHeartRateStatus } = await import('../../lib/health-connect.js');
+      _hrCheck = await checkHeartRateStatus();
+    } catch (e) {
+      _hrCheck = {
+        availability: 'error',
+        heartRatePermission: 'missing',
+        restingHeartRatePermission: 'missing',
+        heartRateRead: 'read_error',
+        avgHeartRateLocal: 'absent',
+        restingHrLocal: 'absent',
+        error: e?.message || 'check failed',
+      };
+    }
+    _hrCheckBusy = false;
+  }
+
+  async function _requestHcPermissions() {
+    _hrPermBusy = true;
+    try {
+      const { requestPermissions } = await import('../../lib/health-connect.js');
+      await requestPermissions();
+      await _runHeartRateCheck();
+    } catch (e) {
+      showError('Health Connect permission request failed');
+    }
+    _hrPermBusy = false;
+  }
+
   // ── Diagnostics: anonymized calibration export ───────────────────────────
   let _calibExportSheet = false;
   let _calibExportJson  = '';
@@ -231,6 +266,35 @@
         View logs{hasCrashReport() ? ' · crash report available' : ''}
       </button>
     </div>
+    {#if isNative}
+      <div class="setting-divider"></div>
+      <div class="setting-row" style="flex-direction:column;align-items:flex-start;gap:8px">
+        <span class="setting-label">Health Connect Heart Rate Check</span>
+        <p class="setting-desc" style="line-height:1.5">
+          Status only (no heart-rate values). Distinguishes missing permission, no records, a successful read, and whether a local wellness row exists after sync.
+        </p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-secondary" style="height:40px;font-size:13px" disabled={_hrCheckBusy} on:click={_runHeartRateCheck}>
+            <span class="material-symbols-rounded" style="font-size:16px">monitor_heart</span>
+            {_hrCheckBusy ? 'Checking…' : 'Run Heart Rate check'}
+          </button>
+          <button class="btn btn-secondary" style="height:40px;font-size:13px" disabled={_hrPermBusy} on:click={_requestHcPermissions}>
+            <span class="material-symbols-rounded" style="font-size:16px">lock_open</span>
+            {_hrPermBusy ? 'Requesting…' : 'Request missing permissions'}
+          </button>
+        </div>
+        {#if _hrCheck}
+          <pre class="setting-desc" style="line-height:1.5;white-space:pre-wrap;font-family:monospace;font-size:12px;margin:0">Health Connect: {_hrCheck.availability}
+READ_HEART_RATE: {_hrCheck.heartRatePermission}
+READ_RESTING_HEART_RATE: {_hrCheck.restingHeartRatePermission}
+HeartRate read: {_hrCheck.heartRateRead}
+avg_heart_rate local row: {_hrCheck.avgHeartRateLocal}
+resting_hr local row: {_hrCheck.restingHrLocal}{#if _hrCheck.error}
+
+error: {_hrCheck.error}{/if}</pre>
+        {/if}
+      </div>
+    {/if}
     <div class="setting-divider"></div>
     <div class="setting-row" style="flex-direction:column;align-items:flex-start;gap:8px">
       <span class="setting-label">{$_('settings_diagnostics.calibration_export')}</span>

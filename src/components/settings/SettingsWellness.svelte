@@ -1278,6 +1278,20 @@
             </div>
           {/if}
           <div class="setting-divider"></div>
+          <div class="setting-row" style="flex-direction:column;align-items:flex-start;gap:8px">
+            <span class="setting-label">Health Connect permissions</span>
+            <div class="setting-desc">If a metric such as Heart Rate is missing, request the remaining Health Connect reads without turning Health Connect off.</div>
+            <button class="btn btn-secondary" style="height:40px;font-size:13px" on:click={async () => {
+              const { requestPermissions } = await import('../../lib/health-connect.js');
+              const perms = await requestPermissions();
+              healthConnectPermissions = perms;
+              showSuccess($_('settings_wellness.hc.enabled_success', { values: { count: perms.read.length } }));
+            }}>
+              <span class="material-symbols-rounded" style="font-size:16px">lock_open</span>
+              Review Health Connect permissions
+            </button>
+          </div>
+          <div class="setting-divider"></div>
           <div class="setting-row">
             <span class="setting-label">{$_('settings_wellness.common.sync_mode')}</span>
             <div class="select-wrap" style="width:150px">

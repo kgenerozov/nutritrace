@@ -25,6 +25,20 @@ const _dlog = import.meta.env.DEV
 
 import { isNative } from './platform.js';
 import { HealthConnect } from '@devmaxime/capacitor-health-connect';
+import {
+  DESIRED_READ_RECORD_TYPES,
+  grantedCoversDesired,
+  grantedReadSet,
+  reconcileReadPermissions,
+} from './health-connect-permissions.js';
+import {
+  classifyHeartRateRead,
+  heartRateFromAggregates,
+  localMetricPresence,
+  sanitizeHealthConnectError,
+} from './health-connect-heart-rate.js';
+
+export { DESIRED_READ_RECORD_TYPES };
 
 function _getPlugin() {
   if (!isNative) return null;
@@ -47,42 +61,34 @@ export async function checkAvailability() {
 }
 
 /**
- * Request read/write permissions from Health Connect.
+ * Request read permissions from Health Connect.
+ *
+ * Reconciles the canonical desired record list against currently granted
+ * reads. Having *any* read permission is not sufficient — missing types
+ * such as HeartRate / RestingHeartRate must still be requested.
+ *
+ * The plugin rejects the whole dialog if any record name is unknown, so
+ * unsupported names are filtered/retried. Final state always comes from
+ * getGrantedPermissions(), not the dialog payload.
  */
 export async function requestPermissions() {
   const hc = _getPlugin();
   if (!hc) return { read: [], write: [] };
   try {
-    // First check if permissions are already granted (avoids triggering crash-prone dialog)
-    const existing = await getGrantedPermissions();
-    if (existing.read?.length > 0) return existing;
-
-    // Request permissions via Health Connect dialog
-    let result;
-    try {
-      result = await hc.requestPermissions({
-        read: ['Steps', 'Weight', 'SleepSession', 'HeartRate', 'ExerciseSession', 'BloodPressure', 'OxygenSaturation', 'BodyFat', 'RespiratoryRate', 'FloorsClimbed', 'Hydration', 'BoneMass', 'LeanBodyMass', 'BodyTemperature', 'BasalMetabolicRate', 'Vo2Max'],
-        write: [],
-      });
-    } catch (e) {
-      console.warn('[health-connect] Permission dialog failed:', e.message);
-      result = { read: [], write: [] };
-    }
-    // Check if permissions were actually granted (singleTask launch mode can cause
-    // the permission dialog to close immediately without user interaction)
-    if (result.read?.length === 0) {
-      // Fallback: open Health Connect app so user can grant permissions manually
+    const before = await getGrantedPermissions();
+    const result = await reconcileReadPermissions(hc, { desired: DESIRED_READ_RECORD_TYPES });
+    if (result.requested?.length && !(result.read?.length)) {
+      // Dialog produced no grants at all (singleTask can close it immediately).
       console.warn('[health-connect] Permission dialog failed — opening Health Connect app');
       try {
-        const { App: CapApp } = await import('@capacitor/app');
-        // Open Health Connect's permission management for our app
         window.open('market://details?id=com.google.android.apps.healthdata', '_system');
       } catch {}
-      return { read: [], write: [] };
+    } else if (result.requested?.length) {
+      _dlog('[health-connect] Permission reconciliation requested', result.requested.join(','));
     }
-    return result;
+    return { read: result.read || before.read || [], write: result.write || [] };
   } catch (e) {
-    console.error('[health-connect] Permission request failed:', e);
+    console.error('[health-connect] Permission request failed:', sanitizeHealthConnectError(e));
     return { read: [], write: [] };
   }
 }
@@ -165,14 +171,19 @@ export async function readTodayData() {
     if (aggregates.length > 0) metrics.active_calories = Math.round(aggregates[0].value);
   } catch {}
 
-  // Heart rate (aggregate)
+  // Heart rate (plugin aggregate uses BPM_AVG / MIN / MAX). A zero bucket
+  // is the plugin default when no samples exist — do not store 0 bpm.
   try {
     const { aggregates } = await hc.aggregateRecords({
       start: todayStart, end: todayEnd,
       type: 'HeartRate', groupBy: 'day',
     });
-    if (aggregates.length > 0) metrics.avg_heart_rate = Math.round(aggregates[0].value);
-  } catch {}
+    _dlog('[health-connect] HeartRate aggregate buckets:', Array.isArray(aggregates) ? aggregates.length : 0);
+    const avgHr = heartRateFromAggregates(aggregates);
+    if (avgHr != null) metrics.avg_heart_rate = avgHr;
+  } catch (e) {
+    console.warn('[health-connect] HeartRate error:', sanitizeHealthConnectError(e));
+  }
 
   // Resting heart rate
   try {
@@ -180,12 +191,15 @@ export async function readTodayData() {
       start: todayStart, end: todayEnd,
       type: 'RestingHeartRate',
     });
+    _dlog('[health-connect] RestingHeartRate records:', records?.length || 0);
     if (records.length > 0) {
-      // Take the most recent reading
       const latest = records[records.length - 1];
-      metrics.resting_hr = latest.beatsPerMinute || latest.value;
+      const rhr = latest.beatsPerMinute || latest.value;
+      if (rhr != null && Number(rhr) > 0) metrics.resting_hr = rhr;
     }
-  } catch {}
+  } catch (e) {
+    console.warn('[health-connect] RestingHeartRate error:', sanitizeHealthConnectError(e));
+  }
 
   // Weight
   try {
@@ -501,11 +515,15 @@ export async function readDateRange(startDate, endDate) {
       start, end, type: 'HeartRate', groupBy: 'day',
     });
     for (const a of aggregates) {
+      const avgHr = heartRateFromAggregates([a]);
+      if (avgHr == null) continue;
       const date = a.startTime.slice(0, 10);
       result[date] = result[date] || {};
-      result[date].avg_heart_rate = Math.round(a.value);
+      result[date].avg_heart_rate = avgHr;
     }
-  } catch {}
+  } catch (e) {
+    console.warn('[health-connect] HeartRate range error:', sanitizeHealthConnectError(e));
+  }
 
   return result;
 }
@@ -668,5 +686,87 @@ export async function syncHealthConnect(dateStr) {
 
   _dlog(`[health-connect] Synced ${Object.keys(metrics).length} metrics + ${workoutCount} workouts for ${dateStr}`);
   return metrics;
+}
+
+/**
+ * On-device Heart Rate status for Settings → Diagnostics.
+ * Reports permission/read/local-row presence only — never BPM values.
+ */
+export async function checkHeartRateStatus(options = {}) {
+  const dateStr = options.dateStr || (() => {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    const d = String(now.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  })();
+
+  const status = {
+    availability: 'NotSupported',
+    heartRatePermission: 'missing',
+    restingHeartRatePermission: 'missing',
+    heartRateRead: 'permission_denied',
+    avgHeartRateLocal: 'absent',
+    restingHrLocal: 'absent',
+    error: null,
+  };
+
+  try {
+    status.availability = await checkAvailability();
+  } catch (e) {
+    status.error = sanitizeHealthConnectError(e);
+    return status;
+  }
+
+  const hc = _getPlugin();
+  if (!hc || status.availability !== 'Available') {
+    return status;
+  }
+
+  let granted = new Set();
+  try {
+    const existing = await getGrantedPermissions();
+    granted = grantedReadSet(existing);
+  } catch (e) {
+    status.error = sanitizeHealthConnectError(e);
+    return status;
+  }
+
+  status.heartRatePermission = grantedCoversDesired('HeartRate', granted) ? 'granted' : 'missing';
+  status.restingHeartRatePermission = grantedCoversDesired('RestingHeartRate', granted) ? 'granted' : 'missing';
+
+  const permissionGranted = status.heartRatePermission === 'granted';
+  let aggregates = [];
+  let readError = null;
+  if (permissionGranted) {
+    try {
+      const now = new Date();
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+      const todayEnd = now.toISOString();
+      const response = await hc.aggregateRecords({
+        start: todayStart, end: todayEnd, type: 'HeartRate', groupBy: 'day',
+      });
+      aggregates = response?.aggregates || [];
+    } catch (e) {
+      readError = e;
+      status.error = sanitizeHealthConnectError(e);
+    }
+  }
+  status.heartRateRead = classifyHeartRateRead({
+    permissionGranted,
+    error: readError,
+    aggregates,
+  });
+
+  try {
+    const { dbGetWellnessByDate } = await import('./db-native.js');
+    const grouped = await dbGetWellnessByDate(dateStr, 'health_connect');
+    status.avgHeartRateLocal = localMetricPresence(grouped, dateStr, 'avg_heart_rate');
+    status.restingHrLocal = localMetricPresence(grouped, dateStr, 'resting_hr');
+  } catch (e) {
+    _dlog('[health-connect] HeartRate local wellness lookup failed:', sanitizeHealthConnectError(e));
+  }
+
+  return status;
 }
 
