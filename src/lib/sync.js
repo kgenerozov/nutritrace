@@ -20,6 +20,7 @@ import {
   dbUpsertFromServer, dbUpsertDiaryFromServer, dbUpsertWellnessFromServer,
   dbPurgeSoftDeleted,
   dbGetPendingSettings, dbMarkSettingsSynced, dbUpsertSettingFromServer,
+  dbGetPendingGoalHistory, dbMarkGoalHistorySynced, dbUpsertGoalHistoryFromServer,
   dbUpsertWorkoutFromServer, dbUpsertActivityFromServer,
   dbGetPendingWorkouts, dbSetWorkoutServerId,
   dbGetPendingDiaryTombstones, dbMarkTombstonesSynced, dbApplyServerTombstones,
@@ -213,6 +214,7 @@ export async function checkOnline(force = false, showErrorBanner = false) {
 async function pushChanges() {
   const pending = await dbGetPendingChanges();
   const pendingSettings = await dbGetPendingSettings();
+  const pendingGoalHistory = await dbGetPendingGoalHistory();
   const activity = pending.activity || [];
   const fasts    = pending.fasts || [];
   const wellness = pending.wellness || [];
@@ -220,7 +222,7 @@ async function pushChanges() {
   // ExerciseSession) that don't have a server_id yet. The rule is
   // `server_id IS NULL` — see dbGetPendingWorkouts. #91.
   const workouts = await dbGetPendingWorkouts();
-  const hasPending = pending.foods.length || pending.meals.length || pending.diary.length || activity.length || fasts.length || wellness.length || workouts.length || pendingSettings.length;
+  const hasPending = pending.foods.length || pending.meals.length || pending.diary.length || activity.length || fasts.length || wellness.length || workouts.length || pendingSettings.length || pendingGoalHistory.length;
   // Option C: pending per-uuid deletions must ride along with the diary
   // rows in the same push so the server's merge treats them as explicit
   // tombstones. Load once, index by date, consume below.
@@ -345,6 +347,11 @@ async function pushChanges() {
       updated_at: s.updated_at,
       deleted_at: s.deleted_at || null,
     })),
+    goal_history: pendingGoalHistory.map(h => ({
+      effective_date: h.effective_date,
+      snapshot: _parseJson(h.snapshot),
+      changed_at: h.changed_at,
+    })),
     // Locally-authored workouts (Health Connect ExerciseSession). Server
     // upserts on (user_id, source, source_id); client_id is used only to
     // stitch the server_id back to the local row via the push result. #91.
@@ -366,7 +373,7 @@ async function pushChanges() {
     })),
   };
 
-  _dlog(`[sync] push payload: ${payload.foods.length} foods, ${payload.meals.length} meals, ${payload.diary.length} diary, ${payload.activity.length} activity, ${payload.fasts.length} fasts, ${payload.wellness.length} wellness, ${payload.workouts.length} workouts, ${payload.settings.length} settings`);
+  _dlog(`[sync] push payload: ${payload.foods.length} foods, ${payload.meals.length} meals, ${payload.diary.length} diary, ${payload.activity.length} activity, ${payload.fasts.length} fasts, ${payload.wellness.length} wellness, ${payload.workouts.length} workouts, ${payload.settings.length} settings, ${payload.goal_history.length} goal history`);
 
   // 30s ceiling. Without a signal, a wedged connection (proxy timeout,
   // dropped TCP, server GC pause) stalls the whole sync loop for the OS
@@ -457,6 +464,11 @@ async function pushChanges() {
   if (pendingSettings.length) {
     await dbMarkSettingsSynced(pendingSettings.map(s => ({ key: s.key, updated_at: s.updated_at })));
   }
+  if (pendingGoalHistory.length) {
+    await dbMarkGoalHistorySynced(
+      pendingGoalHistory.map(h => ({ effective_date: h.effective_date, changed_at: h.changed_at }))
+    );
+  }
 
   // Purge soft-deleted records that have been confirmed pushed
   await dbPurgeSoftDeleted('foods');
@@ -532,6 +544,12 @@ async function pullChanges() {
   for (const w of (data.wellness || [])) {
     try { await dbUpsertWellnessFromServer(w); }
     catch (e) { _pullErr('wellness', w, e); }
+  }
+
+  // Apply effective-dated goal history before current settings.
+  for (const h of (data.goal_history || [])) {
+    try { await dbUpsertGoalHistoryFromServer(h); }
+    catch (e) { _pullErr('goal_history', h, e); }
   }
 
   // Apply settings from server → local SQLite + localStorage
