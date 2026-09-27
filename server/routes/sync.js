@@ -139,7 +139,11 @@ router.get('/pull', wrap((req, res) => {
     : [];
   const goal_history = u != null
     ? db.prepare('SELECT * FROM goal_history WHERE updated_at >= ? AND user_id = ? ORDER BY updated_at').all(sinceSql, u)
-        .map(r => ({ ...r, snapshot: parse(r)?.snapshot || (() => { try { return JSON.parse(r.snapshot); } catch { return {}; } })() }))
+        .map(r => {
+          let snapshot = {};
+          try { snapshot = JSON.parse(r.snapshot || '{}'); } catch {}
+          return { ...r, snapshot };
+        })
     : [];
 
   // Wellness data — pull only (server-generated from Fitbit/Withings/Garmin syncs)
