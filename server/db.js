@@ -100,6 +100,18 @@ db.exec(`
     PRIMARY KEY (user_id, key)
   );
 
+  CREATE TABLE IF NOT EXISTS goal_history (
+    user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    effective_date TEXT NOT NULL,
+    snapshot       TEXT NOT NULL,
+    changed_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    source         TEXT DEFAULT NULL,
+    PRIMARY KEY (user_id, effective_date)
+  );
+  CREATE INDEX IF NOT EXISTS idx_goal_history_user_date
+    ON goal_history(user_id, effective_date);
+
   CREATE TABLE IF NOT EXISTS app_config (
     key   TEXT PRIMARY KEY,
     value TEXT
