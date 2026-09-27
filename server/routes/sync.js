@@ -582,7 +582,7 @@ router.post('/push', wrap(async (req, res) => {
         }
         if (GOAL_HISTORY_SETTING_KEYS.has(s.key) && s.updated_at) {
           const d = String(s.updated_at).slice(0, 10);
-          if (/^\\d{4}-\\d{2}-\\d{2}$/.test(d)) {
+          if (/^\d{4}-\d{2}-\d{2}$/.test(d)) {
             fallbackGoalDate = d;
             if (!fallbackGoalChangedAt || String(s.updated_at) > fallbackGoalChangedAt) {
               fallbackGoalChangedAt = String(s.updated_at);
@@ -603,7 +603,7 @@ router.post('/push', wrap(async (req, res) => {
       }
 
       for (const h of goal_history) {
-        if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(String(h.effective_date || ''))) continue;
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(String(h.effective_date || ''))) continue;
         const changedAt = Number.isFinite(Date.parse(h.changed_at)) ? new Date(h.changed_at).toISOString() : new Date().toISOString();
         db.prepare(
           `INSERT INTO goal_history (user_id, effective_date, snapshot, changed_at, updated_at, source)
