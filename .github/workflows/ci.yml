@@ -6,7 +6,7 @@ name: Checks
 on:
   pull_request:
   push:
-    branches: [ main, dev, feat/historical-nutrition-goals ]
+    branches: [ main, dev ]
 
 jobs:
   checks:
