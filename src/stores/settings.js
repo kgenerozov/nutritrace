@@ -100,6 +100,21 @@ const GOAL_HISTORY_KEYS = new Set([
   'calorieAdjustFromActivity','manualActivityPolicy','lifttraceOverlapFill',
 ]);
 
+function _currentGoalSnapshot() {
+  const goalsValue = DB.getSetting('goals', {});
+  const water = DB.getSetting('waterGoalMl', 2000);
+  const factor = Number(DB.getSetting('calorieGoalFactor', 1));
+  return {
+    goals: goalsValue && typeof goalsValue === 'object' ? goalsValue : {},
+    water_goal_ml: typeof water === 'number' && Number.isFinite(water) ? water : 2000,
+    calorie_goal_mode: DB.getSetting('calorieGoalMode', 'fixed') || 'fixed',
+    calorie_goal_factor: Number.isFinite(factor) && factor > 0 ? factor : 1,
+    calorie_adjust_from_activity: DB.getSetting('calorieAdjustFromActivity', false) === true,
+    manual_activity_policy: DB.getSetting('manualActivityPolicy', 'wearable_wins') || 'wearable_wins',
+    lifttrace_overlap_fill: DB.getSetting('lifttraceOverlapFill', true) !== false,
+  };
+}
+
 async function _nativeSettingWrite(key, value) {
   const { dbUpsertSetting, dbCaptureGoalHistory } = await import('../lib/db-native.js');
   const updatedAt = await dbUpsertSetting(key, value);
@@ -212,8 +227,11 @@ export function scheduleSave(key, value) {
       // lost at the next pull; hand it to the offline queue instead (#211).
       if (!isNative) {
         try {
-          const { queueSetting } = await import('../lib/offline-api.js');
+          const { queueSetting, queueGoalHistory } = await import('../lib/offline-api.js');
           await queueSetting(key, value);
+          if (GOAL_HISTORY_KEYS.has(key)) {
+            await queueGoalHistory(localDateStr(), _currentGoalSnapshot());
+          }
         } catch { /* nothing more to try */ }
       }
     }
@@ -305,7 +323,16 @@ export async function bulkSet(settingsObj) {
     }
   } catch (e) {
     console.warn('[settings] bulk push failed:', e.message);
-    // Leave as 'pending' in local SQLite — differential sync will push them later
+    if (!isNative) {
+      try {
+        const { queueSetting, queueGoalHistory } = await import('../lib/offline-api.js');
+        for (const [key, value] of userPrefEntries) await queueSetting(key, value);
+        if (userPrefEntries.some(([key]) => GOAL_HISTORY_KEYS.has(key))) {
+          await queueGoalHistory(localDateStr(), _currentGoalSnapshot());
+        }
+      } catch {}
+    }
+    // Native rows remain pending in local SQLite; differential sync pushes them later.
   }
 }
 
