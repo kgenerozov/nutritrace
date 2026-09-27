@@ -1,5 +1,5 @@
 import { writable, get, derived } from 'svelte/store';
-import { DB } from '../lib/db.js';
+import { DB, localDateStr } from '../lib/db.js';
 
 // Verbose settings sync logs gated on dev OR opt-in verbose mode
 // (Settings → Diagnostics → Verbose diagnostic logging).
@@ -95,6 +95,17 @@ export const DEVICE_PREFS = new Set([
 // Backwards-compat alias — keeps existing .has(key) checks working without
 // touching every call site. Equivalent to USER_PREFS.
 const SERVER_SETTINGS = USER_PREFS;
+const GOAL_HISTORY_KEYS = new Set([
+  'goals','waterGoalMl','calorieGoalMode','calorieGoalFactor',
+  'calorieAdjustFromActivity','manualActivityPolicy','lifttraceOverlapFill',
+]);
+
+async function _nativeSettingWrite(key, value) {
+  const { dbUpsertSetting, dbCaptureGoalHistory } = await import('../lib/db-native.js');
+  const updatedAt = await dbUpsertSetting(key, value);
+  if (GOAL_HISTORY_KEYS.has(key)) await dbCaptureGoalHistory(localDateStr());
+  return updatedAt;
+}
 
 import { isNative, getServerUrl, getAuthToken, apiUrl } from '../lib/platform.js';
 
@@ -179,7 +190,7 @@ export function scheduleSave(key, value) {
         method: 'PUT',
         credentials: 'include',
         headers: _authHeaders(),
-        body: JSON.stringify({ key, value }),
+        body: JSON.stringify({ key, value, effective_date: localDateStr() }),
         signal: AbortSignal.timeout(8000),
       });
       if (!res.ok) throw new Error(`Server responded ${res.status}`);
@@ -250,10 +261,13 @@ export async function bulkSet(settingsObj) {
   const snapshotByKey = new Map();
   if (isNative && userPrefEntries.length > 0) {
     try {
-      const { dbUpsertSetting } = await import('../lib/db-native.js');
+      const { dbUpsertSetting, dbCaptureGoalHistory } = await import('../lib/db-native.js');
       for (const [key, value] of userPrefEntries) {
         const updatedAt = await dbUpsertSetting(key, value);
         snapshotByKey.set(key, updatedAt);
+      }
+      if (userPrefEntries.some(([key]) => GOAL_HISTORY_KEYS.has(key))) {
+        await dbCaptureGoalHistory(localDateStr());
       }
     } catch (e) {
       console.warn('[settings] bulk native upsert failed:', e.message);
@@ -274,7 +288,7 @@ export async function bulkSet(settingsObj) {
       method: 'PUT',
       credentials: 'include',
       headers: _authHeaders(),
-      body: JSON.stringify({ settings: bulkObj }),
+      body: JSON.stringify({ settings: bulkObj, effective_date: localDateStr() }),
       signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) throw new Error(`Server responded ${res.status}`);
@@ -398,7 +412,7 @@ if (typeof window !== 'undefined') {
     _recentlyChanged.set(key, Date.now());
     // Native: write to local SQLite immediately (marks as pending for sync protection)
     if (isNative) {
-      import('../lib/db-native.js').then(({ dbUpsertSetting }) => dbUpsertSetting(key, value)).catch(() => {});
+      _nativeSettingWrite(key, value).catch(() => {});
     }
     scheduleSave(key, value);
   });
@@ -438,7 +452,7 @@ function createSettingStore(key, defaultValue) {
       _recentlyChanged.set(key, Date.now());
       // On native: write to local SQLite immediately (marks as pending for sync protection)
       if (isNative && SERVER_SETTINGS.has(key)) {
-        import('../lib/db-native.js').then(({ dbUpsertSetting }) => dbUpsertSetting(key, value)).catch(() => {});
+        _nativeSettingWrite(key, value).catch(() => {});
       }
       scheduleSave(key, value);
     },
